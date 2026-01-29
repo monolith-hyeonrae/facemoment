@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# uv
+uv.lock
+
+# Project specific
+clips/
+*.mp4
+*.ts
+*.mkv
+
+# Model weights (downloaded on first run)
+*.onnx
+*.pt
+*.pth
+
+# Temp files
+*.tmp
+*.temp
