@@ -28,6 +28,7 @@ class Observation:
     signals: Dict[str, float] = field(default_factory=dict)
     faces: List["FaceObservation"] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    timing: Optional[Dict[str, float]] = None  # {"detect_ms": 42.3, "expression_ms": 28.1}
 
 
 @dataclass

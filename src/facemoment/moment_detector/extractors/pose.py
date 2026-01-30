@@ -3,6 +3,7 @@
 from typing import Optional, Dict, List
 from collections import deque
 import logging
+import time
 
 import numpy as np
 
@@ -16,8 +17,13 @@ from facemoment.moment_detector.extractors.backends.base import (
     PoseBackend,
     PoseKeypoints,
 )
+from facemoment.observability import ObservabilityHub, TraceLevel
+from facemoment.observability.records import FrameExtractRecord, TimingRecord
 
 logger = logging.getLogger(__name__)
+
+# Get the global observability hub
+_hub = ObservabilityHub.get_instance()
 
 
 # Keypoint indices for COCO 17 format
@@ -131,6 +137,9 @@ class PoseExtractor(BaseExtractor):
         if self._pose_backend is None:
             raise RuntimeError("Extractor not initialized. Call initialize() first.")
 
+        # Start timing for observability
+        start_ns = time.perf_counter_ns() if _hub.enabled else 0
+
         image = frame.data
         h, w = image.shape[:2]
         t_ns = frame.t_src_ns
@@ -139,6 +148,10 @@ class PoseExtractor(BaseExtractor):
         poses = self._pose_backend.detect(image)
 
         if not poses:
+            # Emit timing record
+            if _hub.enabled:
+                processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+                self._emit_extract_record(frame, 0, False, processing_ms, {})
             return Observation(
                 source=self.name,
                 frame_id=frame.frame_id,
@@ -200,6 +213,11 @@ class PoseExtractor(BaseExtractor):
             "hand_wave_confidence": wave_confidence,
             **pose_signals,
         }
+
+        # Emit observability records
+        if _hub.enabled:
+            processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+            self._emit_extract_record(frame, len(poses), wave_detected, processing_ms, signals)
 
         return Observation(
             source=self.name,
@@ -352,3 +370,38 @@ class PoseExtractor(BaseExtractor):
 
         for person_id in to_remove:
             del self._wrist_history[person_id]
+
+    def _emit_extract_record(
+        self,
+        frame: Frame,
+        pose_count: int,
+        wave_detected: bool,
+        processing_ms: float,
+        signals: Dict[str, float],
+    ) -> None:
+        """Emit extraction observability records.
+
+        Args:
+            frame: The processed frame.
+            pose_count: Number of poses detected.
+            wave_detected: Whether wave gesture was detected.
+            processing_ms: Processing time in milliseconds.
+            signals: Signal dictionary.
+        """
+        threshold_ms = 30.0  # Pose is generally faster
+        _hub.emit(FrameExtractRecord(
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            source=self.name,
+            pose_count=pose_count,
+            gesture_detected=wave_detected,
+            processing_ms=processing_ms,
+            signals=signals if _hub.is_level_enabled(TraceLevel.VERBOSE) else {},
+        ))
+        _hub.emit(TimingRecord(
+            frame_id=frame.frame_id,
+            component=self.name,
+            processing_ms=processing_ms,
+            threshold_ms=threshold_ms,
+            is_slow=processing_ms > threshold_ms,
+        ))

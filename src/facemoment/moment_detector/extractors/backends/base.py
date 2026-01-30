@@ -62,6 +62,24 @@ class PoseKeypoints:
     confidence: float = 1.0
 
 
+@dataclass
+class HandLandmarks:
+    """Result from hand landmark detection backend.
+
+    MediaPipe Hands provides 21 landmarks per hand.
+
+    Attributes:
+        landmarks: Array of shape (21, 3) with (x, y, z) per landmark.
+            Coordinates are normalized [0, 1].
+        handedness: "Left" or "Right".
+        confidence: Detection confidence [0, 1].
+    """
+
+    landmarks: np.ndarray  # Shape: (21, 3) - x, y, z normalized
+    handedness: str  # "Left" or "Right"
+    confidence: float = 1.0
+
+
 class FaceDetectionBackend(Protocol):
     """Protocol for face detection backends.
 
@@ -150,6 +168,37 @@ class PoseBackend(Protocol):
 
         Returns:
             List of detected poses with keypoints.
+        """
+        ...
+
+    def cleanup(self) -> None:
+        """Release resources and unload models."""
+        ...
+
+
+class HandLandmarkBackend(Protocol):
+    """Protocol for hand landmark detection backends.
+
+    Implementations detect hand landmarks for gesture classification.
+    Examples: MediaPipe Hands.
+    """
+
+    def initialize(self, device: str = "cpu") -> None:
+        """Initialize the backend and load models.
+
+        Args:
+            device: Device to use (MediaPipe typically uses CPU).
+        """
+        ...
+
+    def detect(self, image: np.ndarray) -> List[HandLandmarks]:
+        """Detect hands and their landmarks in an image.
+
+        Args:
+            image: BGR image as numpy array (H, W, 3).
+
+        Returns:
+            List of detected hands with landmarks.
         """
         ...
 

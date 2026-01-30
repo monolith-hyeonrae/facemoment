@@ -12,8 +12,8 @@ def create_observation(
     face_count: int = 1,
     expression: float = 0.3,
     confidence: float = 0.9,
-    yaw: float = 0.0,
-    pitch: float = 0.0,
+    yaw: float = 15.0,  # Default to looking slightly away (avoid camera_gaze trigger)
+    pitch: float = 10.0,  # Default to looking slightly away
     inside_frame: bool = True,
     area_ratio: float = 0.05,
     center_distance: float = 0.1,
@@ -419,3 +419,341 @@ class TestHighlightFusion:
                 break
 
         assert triggered
+
+
+class TestHighlightFusionPhase9:
+    """Tests for Phase 9 gokart scenario features."""
+
+    def test_camera_gaze_detection_looking_at_camera(self):
+        """Test camera gaze triggers when looking directly at camera."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            gaze_yaw_threshold=10.0,
+            gaze_pitch_threshold=15.0,
+            gaze_score_threshold=0.5,
+            consecutive_frames=2,
+            cooldown_sec=0.5,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        # Open gate and establish baseline
+        for i in range(10):
+            obs = create_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                yaw=20.0,  # Not looking at camera initially
+            )
+            fusion.update(obs)
+
+        # Now look at camera (yaw and pitch close to 0)
+        triggered = False
+        for i in range(10, 20):
+            obs = create_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                yaw=2.0,  # Looking almost straight at camera
+                pitch=3.0,
+            )
+            result = fusion.update(obs)
+            if result.should_trigger and result.reason == "camera_gaze":
+                triggered = True
+                break
+
+        assert triggered
+
+    def test_camera_gaze_no_trigger_when_looking_away(self):
+        """Test camera gaze does not trigger when looking away."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            gaze_yaw_threshold=10.0,
+            gaze_pitch_threshold=15.0,
+            gaze_score_threshold=0.5,
+            consecutive_frames=2,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        # Process frames with head turned away
+        camera_gaze_triggered = False
+        for i in range(20):
+            obs = create_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                yaw=15.0,  # Looking to the side
+                pitch=0.0,
+            )
+            result = fusion.update(obs)
+            if result.should_trigger and result.reason == "camera_gaze":
+                camera_gaze_triggered = True
+
+        assert not camera_gaze_triggered
+
+    def test_passenger_interaction_detection(self):
+        """Test passenger interaction when two people look at each other."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            interaction_yaw_threshold=15.0,
+            consecutive_frames=2,
+            cooldown_sec=0.5,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        # Create observation with 2 faces looking at each other
+        def create_two_face_observation(
+            frame_id: int,
+            t_ns: int,
+            left_yaw: float,
+            right_yaw: float,
+        ) -> Observation:
+            faces = [
+                FaceObservation(
+                    face_id=0,
+                    confidence=0.9,
+                    bbox=(0.2, 0.2, 0.2, 0.3),  # Left face
+                    inside_frame=True,
+                    yaw=left_yaw,
+                    pitch=0.0,
+                    area_ratio=0.05,
+                    center_distance=0.15,
+                    expression=0.3,
+                ),
+                FaceObservation(
+                    face_id=1,
+                    confidence=0.9,
+                    bbox=(0.6, 0.2, 0.2, 0.3),  # Right face
+                    inside_frame=True,
+                    yaw=right_yaw,
+                    pitch=0.0,
+                    area_ratio=0.05,
+                    center_distance=0.15,
+                    expression=0.3,
+                ),
+            ]
+            return Observation(
+                source="test",
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={
+                    "face_count": 2,
+                    "quality_gate": 1.0,
+                },
+                faces=faces,
+            )
+
+        # Open gate first with faces not looking at each other
+        for i in range(10):
+            obs = create_two_face_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                left_yaw=0.0,  # Looking forward
+                right_yaw=0.0,
+            )
+            fusion.update(obs)
+
+        # Now faces look at each other
+        triggered = False
+        for i in range(10, 20):
+            obs = create_two_face_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                left_yaw=25.0,  # Left person looking right
+                right_yaw=-25.0,  # Right person looking left
+            )
+            result = fusion.update(obs)
+            if result.should_trigger and result.reason == "passenger_interaction":
+                triggered = True
+                break
+
+        assert triggered
+
+    def test_passenger_interaction_no_trigger_single_face(self):
+        """Test passenger interaction does not trigger with single face."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            consecutive_frames=2,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        # Single face - should not trigger passenger interaction
+        triggered_interaction = False
+        for i in range(20):
+            obs = create_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                face_count=1,
+            )
+            result = fusion.update(obs)
+            if result.should_trigger and result.reason == "passenger_interaction":
+                triggered_interaction = True
+
+        assert not triggered_interaction
+
+    def test_gesture_trigger_vsign(self):
+        """Test gesture trigger for V-sign."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            consecutive_frames=2,
+            cooldown_sec=0.5,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        def create_gesture_observation(
+            frame_id: int,
+            t_ns: int,
+            gesture_type: str,
+            gesture_confidence: float,
+        ) -> Observation:
+            return Observation(
+                source="gesture",
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={
+                    "face_count": 1,
+                    "quality_gate": 1.0,
+                    "gesture_detected": 1.0 if gesture_confidence > 0 else 0.0,
+                    "gesture_confidence": gesture_confidence,
+                },
+                faces=[
+                    FaceObservation(
+                        face_id=0,
+                        confidence=0.9,
+                        bbox=(0.3, 0.2, 0.2, 0.3),
+                        inside_frame=True,
+                        yaw=15.0,  # Looking slightly away (avoid camera_gaze)
+                        pitch=10.0,
+                        area_ratio=0.05,
+                        center_distance=0.1,
+                        expression=0.3,
+                    )
+                ],
+                metadata={
+                    "gesture_type": gesture_type,
+                },
+            )
+
+        # Open gate first
+        for i in range(5):
+            obs = create_observation(frame_id=i, t_ns=i * frame_interval_ns)
+            fusion.update(obs)
+
+        # Send V-sign gesture
+        triggered = False
+        for i in range(5, 15):
+            obs = create_gesture_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                gesture_type="v_sign",
+                gesture_confidence=0.9,
+            )
+            result = fusion.update(obs)
+            if result.should_trigger and result.reason == "gesture_vsign":
+                triggered = True
+                break
+
+        assert triggered
+
+    def test_gesture_trigger_thumbsup(self):
+        """Test gesture trigger for thumbs up."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            consecutive_frames=2,
+            cooldown_sec=0.5,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        def create_gesture_observation(
+            frame_id: int,
+            t_ns: int,
+            gesture_type: str,
+            gesture_confidence: float,
+        ) -> Observation:
+            return Observation(
+                source="gesture",
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={
+                    "face_count": 1,
+                    "quality_gate": 1.0,
+                    "gesture_detected": 1.0 if gesture_confidence > 0 else 0.0,
+                    "gesture_confidence": gesture_confidence,
+                },
+                faces=[
+                    FaceObservation(
+                        face_id=0,
+                        confidence=0.9,
+                        bbox=(0.3, 0.2, 0.2, 0.3),
+                        inside_frame=True,
+                        yaw=15.0,  # Looking slightly away (avoid camera_gaze)
+                        pitch=10.0,
+                        area_ratio=0.05,
+                        center_distance=0.1,
+                        expression=0.3,
+                    )
+                ],
+                metadata={
+                    "gesture_type": gesture_type,
+                },
+            )
+
+        # Open gate first
+        for i in range(5):
+            obs = create_observation(frame_id=i, t_ns=i * frame_interval_ns)
+            fusion.update(obs)
+
+        # Send thumbs up gesture
+        triggered = False
+        for i in range(5, 15):
+            obs = create_gesture_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                gesture_type="thumbs_up",
+                gesture_confidence=0.9,
+            )
+            result = fusion.update(obs)
+            if result.should_trigger and result.reason == "gesture_thumbsup":
+                triggered = True
+                break
+
+        assert triggered
+
+    def test_new_trigger_types_in_metadata(self):
+        """Test that new trigger types include proper metadata."""
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            consecutive_frames=2,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        # Open gate
+        for i in range(10):
+            obs = create_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                yaw=15.0,
+            )
+            fusion.update(obs)
+
+        # Trigger camera gaze
+        result = None
+        for i in range(10, 20):
+            obs = create_observation(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                yaw=2.0,
+                pitch=2.0,
+            )
+            result = fusion.update(obs)
+            if result.should_trigger:
+                break
+
+        if result and result.should_trigger:
+            assert result.trigger is not None
+            assert result.trigger.label == "highlight"
+            assert result.trigger.metadata is not None
+            assert "reason" in result.trigger.metadata

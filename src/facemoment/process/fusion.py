@@ -9,7 +9,9 @@ Architecture:
     B3 (quality)┘
          OBS             TRIG
 
-Example:
+Supports interface-based dependency injection for swappable transports.
+
+Example (legacy path-based):
     >>> from facemoment.moment_detector.fusion.highlight import HighlightFusion
     >>> process = FusionProcess(
     ...     fusion=HighlightFusion(),
@@ -17,6 +19,17 @@ Example:
     ...     trig_socket="/tmp/trig.sock",
     ... )
     >>> process.run()  # Blocking main loop
+
+Example (interface-based):
+    >>> from visualbase.ipc.factory import TransportFactory
+    >>> obs_receiver = TransportFactory.create_message_receiver("uds", "/tmp/obs.sock")
+    >>> trig_sender = TransportFactory.create_message_sender("uds", "/tmp/trig.sock")
+    >>> process = FusionProcess(
+    ...     fusion=HighlightFusion(),
+    ...     obs_receiver=obs_receiver,
+    ...     trig_sender=trig_sender,
+    ... )
+    >>> process.run()
 """
 
 import signal
@@ -27,7 +40,8 @@ from typing import Optional, List, Dict, Callable
 import threading
 from collections import defaultdict
 
-from visualbase.ipc.uds import UDSServer, UDSClient
+from visualbase.ipc.interfaces import MessageReceiver, MessageSender
+from visualbase.ipc.factory import TransportFactory
 from visualbase.ipc.messages import (
     parse_obs_message,
     OBSMessage,
@@ -36,8 +50,13 @@ from visualbase.ipc.messages import (
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
 from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.observability import ObservabilityHub
+from facemoment.observability.records import TimingRecord, SyncDelayRecord
 
 logger = logging.getLogger(__name__)
+
+# Get the global observability hub
+_hub = ObservabilityHub.get_instance()
 
 
 # Time window for observation alignment (100ms)
@@ -47,14 +66,21 @@ ALIGNMENT_WINDOW_NS = 100_000_000
 class FusionProcess:
     """Wrapper for running fusion as an independent process.
 
-    Receives OBS messages from extractors via UDS, converts them to
+    Receives OBS messages from extractors via MessageReceiver, converts them to
     Observations, runs the fusion engine, and sends TRIG messages to
-    the ingest process.
+    the ingest process via MessageSender.
+
+    Supports two initialization modes:
+    1. Interface-based: Pass MessageReceiver and MessageSender instances directly
+    2. Legacy path-based: Pass obs_socket and trig_socket paths (auto-creates UDS)
 
     Args:
         fusion: The fusion engine instance.
-        obs_socket: Path to the UDS socket for receiving OBS messages.
-        trig_socket: Path to the UDS socket for sending TRIG messages.
+        obs_receiver: MessageReceiver instance for receiving OBS messages.
+        trig_sender: MessageSender instance for sending TRIG messages.
+        obs_socket: (Legacy) Path to the UDS socket for receiving OBS messages.
+        trig_socket: (Legacy) Path to the UDS socket for sending TRIG messages.
+        message_transport: Transport type for messages ("uds", "zmq"). Default: "uds".
         alignment_window_ns: Time window for observation alignment.
         on_trigger: Optional callback for each trigger.
     """
@@ -62,19 +88,42 @@ class FusionProcess:
     def __init__(
         self,
         fusion: BaseFusion,
-        obs_socket: str,
-        trig_socket: str,
+        obs_receiver: Optional[MessageReceiver] = None,
+        trig_sender: Optional[MessageSender] = None,
+        obs_socket: Optional[str] = None,
+        trig_socket: Optional[str] = None,
+        message_transport: str = "uds",
         alignment_window_ns: int = ALIGNMENT_WINDOW_NS,
         on_trigger: Optional[Callable[[FusionResult], None]] = None,
     ):
         self._fusion = fusion
-        self._obs_socket = obs_socket
-        self._trig_socket = trig_socket
         self._alignment_window_ns = alignment_window_ns
         self._on_trigger = on_trigger
 
-        self._obs_server: Optional[UDSServer] = None
-        self._trig_client: Optional[UDSClient] = None
+        # Store transport config
+        self._message_transport = message_transport
+        self._obs_path = obs_socket
+        self._trig_path = trig_socket
+
+        # Interface-based or legacy path-based initialization
+        if obs_receiver is not None:
+            self._obs_server: Optional[MessageReceiver] = obs_receiver
+            self._obs_server_provided = True
+        elif obs_socket is not None:
+            self._obs_server = None  # Created in run()
+            self._obs_server_provided = False
+        else:
+            raise ValueError("Either obs_receiver or obs_socket must be provided")
+
+        if trig_sender is not None:
+            self._trig_client: Optional[MessageSender] = trig_sender
+            self._trig_client_provided = True
+        elif trig_socket is not None:
+            self._trig_client = None  # Created in run()
+            self._trig_client_provided = False
+        else:
+            raise ValueError("Either trig_sender or trig_socket must be provided")
+
         self._running = False
         self._shutdown = threading.Event()
 
@@ -101,19 +150,32 @@ class FusionProcess:
         self._running = True
         self._start_time = time.monotonic()
 
+        # Create OBS receiver if not provided
+        if self._obs_server is None and self._obs_path is not None:
+            self._obs_server = TransportFactory.create_message_receiver(
+                self._message_transport, self._obs_path
+            )
+
         # Start OBS server
-        self._obs_server = UDSServer(self._obs_socket)
+        if self._obs_server is None:
+            logger.error("No OBS receiver available")
+            return
         self._obs_server.start()
 
+        # Create TRIG sender if not provided
+        if self._trig_client is None and self._trig_path is not None:
+            self._trig_client = TransportFactory.create_message_sender(
+                self._message_transport, self._trig_path
+            )
+
         # Connect to TRIG socket
-        self._trig_client = UDSClient(self._trig_socket)
-        if not self._trig_client.connect():
-            logger.error(f"Failed to connect to TRIG socket: {self._trig_socket}")
+        if self._trig_client is None or not self._trig_client.connect():
+            logger.error(f"Failed to connect to TRIG socket: {self._trig_path}")
             return
 
         logger.info(f"Fusion process started")
-        logger.info(f"  OBS socket: {self._obs_socket}")
-        logger.info(f"  TRIG socket: {self._trig_socket}")
+        logger.info(f"  OBS receiver: {self._obs_path or 'provided'}")
+        logger.info(f"  TRIG sender: {self._trig_path or 'provided'}")
 
         try:
             while self._running and not self._shutdown.is_set():
@@ -167,8 +229,23 @@ class FusionProcess:
         frames_to_process = []
         for frame_id in list(self._obs_buffer.keys()):
             t_ns = self._frame_timestamps.get(frame_id, 0)
-            if current_t_ns - t_ns > self._alignment_window_ns:
+            delay_ns = current_t_ns - t_ns
+            if delay_ns > self._alignment_window_ns:
                 frames_to_process.append(frame_id)
+
+                # Emit sync delay record if significant delay
+                if _hub.enabled and delay_ns > self._alignment_window_ns * 1.5:
+                    obs_sources = list(self._obs_buffer.get(frame_id, {}).keys())
+                    expected_sources = {"face", "pose", "quality"}
+                    missing_sources = list(expected_sources - set(obs_sources))
+                    if missing_sources:
+                        _hub.emit(SyncDelayRecord(
+                            frame_id=frame_id,
+                            expected_ns=int(self._alignment_window_ns),
+                            actual_ns=int(delay_ns),
+                            delay_ms=(delay_ns - self._alignment_window_ns) / 1_000_000,
+                            waiting_for=missing_sources,
+                        ))
 
         # Process in order
         for frame_id in sorted(frames_to_process):
@@ -179,6 +256,8 @@ class FusionProcess:
 
     def _process_frame_observations(self, frame_id: int) -> None:
         """Process all observations for a single frame."""
+        start_ns = time.perf_counter_ns() if _hub.enabled else 0
+
         obs_dict = self._obs_buffer.get(frame_id, {})
         if not obs_dict:
             return
@@ -195,6 +274,18 @@ class FusionProcess:
                 except Exception as e:
                     logger.error(f"Fusion error: {e}")
                     self._errors += 1
+
+        # Emit timing record for fusion process
+        if _hub.enabled:
+            processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+            _hub.emit(TimingRecord(
+                frame_id=frame_id,
+                component="fusion_process",
+                processing_ms=processing_ms,
+                queue_depth=len(self._obs_buffer),
+                threshold_ms=50.0,
+                is_slow=processing_ms > 50.0,
+            ))
 
     def _obs_to_observation(self, obs_msg: OBSMessage) -> Optional[Observation]:
         """Convert an OBSMessage to an Observation."""
@@ -267,11 +358,13 @@ class FusionProcess:
         """Clean up resources."""
         if self._obs_server:
             self._obs_server.stop()
-            self._obs_server = None
+            if not self._obs_server_provided:
+                self._obs_server = None
 
         if self._trig_client:
             self._trig_client.disconnect()
-            self._trig_client = None
+            if not self._trig_client_provided:
+                self._trig_client = None
 
         # Log stats
         elapsed = time.monotonic() - self._start_time if self._start_time else 0

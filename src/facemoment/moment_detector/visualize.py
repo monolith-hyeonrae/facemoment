@@ -1,9 +1,11 @@
 """Visualization utilities for debugging extractors and fusion."""
 
-from typing import Optional, List, Tuple, Iterator
+from typing import Optional, List, Tuple, Iterator, Dict
 from dataclasses import dataclass
 from pathlib import Path
+from collections import deque
 import logging
+import time
 
 import cv2
 import numpy as np
@@ -440,6 +442,263 @@ class FusionVisualizer:
         cv2.putText(image, "0.0", (x - 25, y + height), cfg.font, cfg.font_scale * 0.6, cfg.text_color, 1)
 
 
+class TraceVisualizer:
+    """Visualizer for observability trace data.
+
+    Renders timing panels, component performance graphs, and
+    diagnostic information at VERBOSE trace level.
+    """
+
+    def __init__(
+        self,
+        config: Optional[VisualizationConfig] = None,
+        history_size: int = 100,
+    ):
+        self.config = config or VisualizationConfig()
+        self._history_size = history_size
+
+        # Timing history per component
+        self._timing_history: Dict[str, deque] = {}
+        self._frame_count = 0
+        self._start_time = time.monotonic()
+        self._fps_history: deque = deque(maxlen=30)
+        self._last_frame_time = time.monotonic()
+
+        # Stats
+        self._dropped_count = 0
+        self._slow_count = 0
+
+    def reset(self) -> None:
+        """Reset all state."""
+        self._timing_history.clear()
+        self._frame_count = 0
+        self._start_time = time.monotonic()
+        self._fps_history.clear()
+        self._last_frame_time = time.monotonic()
+        self._dropped_count = 0
+        self._slow_count = 0
+
+    def record_timing(self, component: str, processing_ms: float, is_slow: bool = False) -> None:
+        """Record component timing data.
+
+        Args:
+            component: Component name (e.g., "face", "pose", "gesture").
+            processing_ms: Processing time in milliseconds.
+            is_slow: Whether this was a slow frame.
+        """
+        if component not in self._timing_history:
+            self._timing_history[component] = deque(maxlen=self._history_size)
+        self._timing_history[component].append(processing_ms)
+        if is_slow:
+            self._slow_count += 1
+
+    def record_frame(self) -> None:
+        """Record a frame for FPS calculation."""
+        self._frame_count += 1
+        now = time.monotonic()
+        dt = now - self._last_frame_time
+        if dt > 0:
+            self._fps_history.append(1.0 / dt)
+        self._last_frame_time = now
+
+    def record_drop(self, count: int = 1) -> None:
+        """Record dropped frames."""
+        self._dropped_count += count
+
+    def draw_timing_panel(
+        self,
+        image: np.ndarray,
+        x: int = 10,
+        y: int = 10,
+        width: int = 280,
+        target_fps: float = 10.0,
+    ) -> np.ndarray:
+        """Draw timing panel overlay on image.
+
+        Args:
+            image: Input image.
+            x: Panel x position.
+            y: Panel y position.
+            width: Panel width.
+            target_fps: Target FPS for comparison.
+
+        Returns:
+            Image with timing panel overlay.
+        """
+        cfg = self.config
+        output = image.copy()
+
+        # Calculate stats
+        actual_fps = sum(self._fps_history) / len(self._fps_history) if self._fps_history else 0
+        elapsed = time.monotonic() - self._start_time
+        avg_latency = 0
+
+        # Panel background
+        panel_height = 30 + 25 * (len(self._timing_history) + 1)
+        cv2.rectangle(
+            output,
+            (x, y),
+            (x + width, y + panel_height),
+            (40, 40, 40),
+            -1,
+        )
+        cv2.rectangle(
+            output,
+            (x, y),
+            (x + width, y + panel_height),
+            (100, 100, 100),
+            1,
+        )
+
+        # Title
+        cv2.putText(
+            output,
+            "Timing Panel (VERBOSE)",
+            (x + 5, y + 15),
+            cfg.font,
+            cfg.font_scale * 0.7,
+            (200, 200, 200),
+            1,
+        )
+
+        # FPS line
+        fps_color = (0, 255, 0) if actual_fps >= target_fps * 0.9 else (0, 255, 255) if actual_fps >= target_fps * 0.7 else (0, 0, 255)
+        cv2.putText(
+            output,
+            f"FPS: {actual_fps:.1f}/{target_fps:.0f}",
+            (x + 5, y + 35),
+            cfg.font,
+            cfg.font_scale * 0.6,
+            fps_color,
+            1,
+        )
+
+        # Dropped frames
+        drop_text = f"Dropped: {self._dropped_count}"
+        if self._dropped_count > 0:
+            drop_color = (0, 0, 255)  # Red
+        else:
+            drop_color = (0, 255, 0)  # Green
+        cv2.putText(
+            output,
+            drop_text,
+            (x + 120, y + 35),
+            cfg.font,
+            cfg.font_scale * 0.6,
+            drop_color,
+            1,
+        )
+
+        # Component timing bars
+        row_y = y + 50
+        bar_max_width = width - 100
+
+        for component, history in self._timing_history.items():
+            if not history:
+                continue
+
+            avg_ms = sum(history) / len(history)
+            max_ms = max(history)
+
+            # Bar width based on time (scale: 0-100ms)
+            bar_width = min(int(avg_ms * bar_max_width / 100), bar_max_width)
+            bar_color = (0, 255, 0) if avg_ms < 50 else (0, 255, 255) if avg_ms < 80 else (0, 0, 255)
+
+            # Component label
+            cv2.putText(
+                output,
+                f"{component[:8]:>8}:",
+                (x + 5, row_y + 5),
+                cfg.font,
+                cfg.font_scale * 0.5,
+                cfg.text_color,
+                1,
+            )
+
+            # Bar
+            cv2.rectangle(
+                output,
+                (x + 70, row_y - 8),
+                (x + 70 + bar_width, row_y + 4),
+                bar_color,
+                -1,
+            )
+
+            # Value
+            cv2.putText(
+                output,
+                f"{avg_ms:.0f}ms",
+                (x + 75 + bar_max_width, row_y + 5),
+                cfg.font,
+                cfg.font_scale * 0.5,
+                cfg.text_color,
+                1,
+            )
+
+            row_y += 20
+
+        return output
+
+    def draw_gate_checklist(
+        self,
+        image: np.ndarray,
+        conditions: Dict[str, bool],
+        x: int = 10,
+        y: int = 200,
+    ) -> np.ndarray:
+        """Draw gate condition checklist.
+
+        Args:
+            image: Input image.
+            conditions: Dict of condition name -> pass/fail.
+            x: Panel x position.
+            y: Panel y position.
+
+        Returns:
+            Image with gate checklist overlay.
+        """
+        cfg = self.config
+        output = image.copy()
+
+        # Panel background
+        panel_height = 20 + 15 * len(conditions)
+        cv2.rectangle(
+            output,
+            (x, y),
+            (x + 180, y + panel_height),
+            (40, 40, 40),
+            -1,
+        )
+
+        # Title
+        cv2.putText(
+            output,
+            "Gate Conditions:",
+            (x + 5, y + 15),
+            cfg.font,
+            cfg.font_scale * 0.6,
+            cfg.text_color,
+            1,
+        )
+
+        row_y = y + 30
+        for name, passed in conditions.items():
+            mark = "v" if passed else "x"
+            color = (0, 255, 0) if passed else (0, 0, 255)
+            cv2.putText(
+                output,
+                f"[{mark}] {name}",
+                (x + 5, row_y),
+                cfg.font,
+                cfg.font_scale * 0.5,
+                color,
+                1,
+            )
+            row_y += 15
+
+        return output
+
+
 class DebugVisualizer:
     """Combined visualizer for full pipeline debugging."""
 
@@ -461,6 +720,7 @@ class DebugVisualizer:
         fusion_result: Optional[FusionResult] = None,
         is_gate_open: bool = False,
         in_cooldown: bool = False,
+        timing: Optional[Dict[str, float]] = None,
     ) -> np.ndarray:
         """Create combined debug visualization.
 
@@ -472,6 +732,7 @@ class DebugVisualizer:
             fusion_result: Fusion result.
             is_gate_open: Gate state.
             in_cooldown: Cooldown state.
+            timing: Optional timing dict for profile mode.
 
         Returns:
             Debug visualization image.
@@ -497,6 +758,10 @@ class DebugVisualizer:
                 image, face_obs, fusion_result, is_gate_open, in_cooldown
             )
 
+        # Draw timing overlay in profile mode
+        if timing is not None:
+            image = self.draw_timing_overlay(image, timing)
+
         # Frame info
         cv2.putText(
             image,
@@ -509,6 +774,77 @@ class DebugVisualizer:
         )
 
         return image
+
+    def draw_timing_overlay(
+        self,
+        image: np.ndarray,
+        timing: Dict[str, float],
+    ) -> np.ndarray:
+        """Draw timing overlay for profile mode.
+
+        Args:
+            image: Input BGR image.
+            timing: Dict with timing values (detect_ms, expression_ms, total_ms).
+
+        Returns:
+            Image with timing overlay.
+        """
+        output = image.copy()
+        h, w = output.shape[:2]
+        cfg = self.config
+
+        # Panel position (right side, below quality metrics)
+        panel_w = 180
+        panel_h = 70
+        panel_x = w - panel_w - 10
+        panel_y = 140  # Below quality overlay area
+
+        # Semi-transparent background
+        overlay = output.copy()
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (30, 30, 30), -1)
+        cv2.addWeighted(overlay, 0.7, output, 0.3, 0, output)
+
+        # Border
+        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (100, 100, 100), 1)
+
+        # Title
+        cv2.putText(
+            output,
+            "Profile",
+            (panel_x + 5, panel_y + 15),
+            cfg.font,
+            cfg.font_scale * 0.7,
+            (200, 200, 200),
+            1,
+        )
+
+        # Timing values
+        detect_ms = timing.get('detect_ms', 0)
+        expr_ms = timing.get('expression_ms', 0)
+        total_ms = timing.get('total_ms', 0)
+
+        # Calculate FPS from total
+        fps = 1000.0 / total_ms if total_ms > 0 else 0
+
+        # Color code based on performance
+        def get_color(ms: float, threshold: float = 50.0) -> Tuple[int, int, int]:
+            if ms < threshold * 0.6:
+                return (0, 255, 0)  # Green - fast
+            elif ms < threshold:
+                return (0, 255, 255)  # Yellow - acceptable
+            else:
+                return (0, 0, 255)  # Red - slow
+
+        y_offset = panel_y + 30
+        line_height = 14
+
+        cv2.putText(output, f"Detect:  {detect_ms:6.1f}ms", (panel_x + 5, y_offset), cfg.font, cfg.font_scale * 0.6, get_color(detect_ms, 50), 1)
+        y_offset += line_height
+        cv2.putText(output, f"Express: {expr_ms:6.1f}ms", (panel_x + 5, y_offset), cfg.font, cfg.font_scale * 0.6, get_color(expr_ms, 50), 1)
+        y_offset += line_height
+        cv2.putText(output, f"Total:   {total_ms:6.1f}ms ({fps:.1f} FPS)", (panel_x + 5, y_offset), cfg.font, cfg.font_scale * 0.6, get_color(total_ms, 100), 1)
+
+        return output
 
 
 def run_debug_session(
@@ -590,38 +926,70 @@ def run_debug_session(
 
     visualizer = DebugVisualizer()
 
-    # Open video
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
+    # Open video - try visualbase first, fallback to cv2
+    vb = None
+    source_info = None
+    stream = None
+    use_legacy = False
 
-    video_fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_skip = max(1, int(video_fps / fps))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    try:
+        from visualbase import VisualBase, FileSource
+
+        source = FileSource(video_path)
+        source.open()
+
+        # Check required API compatibility
+        for attr in ['fps', 'frame_count', 'width', 'height']:
+            if not hasattr(source, attr):
+                raise AttributeError(f"FileSource missing '{attr}'")
+
+        vb = VisualBase()
+        vb.connect(source)
+        stream = vb.get_stream(fps=int(fps))
+        source_info = source
+
+    except (ImportError, AttributeError, TypeError) as e:
+        logger.warning(f"visualbase API incompatible, using cv2 fallback: {e}")
+        use_legacy = True
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open video: {video_path}")
+
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_skip = max(1, int(video_fps / fps)) if fps > 0 else 1
+
+        class _SourceInfo:
+            def __init__(self):
+                self.fps = video_fps
+                self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        source_info = _SourceInfo()
+
+        def _legacy_stream():
+            frame_id = 0
+            while True:
+                ret, image = cap.read()
+                if not ret:
+                    break
+                if frame_id % frame_skip == 0:
+                    t_ns = int(frame_id / video_fps * 1e9)
+                    yield Frame.from_array(image, frame_id=frame_id, t_src_ns=t_ns)
+                frame_id += 1
+
+        stream = _legacy_stream()
 
     # Output writer
     writer = None
     if output_path:
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_w, frame_h))
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (source_info.width, source_info.height))
 
-    frame_id = 0
+    frame_count = 0
     try:
-        while True:
-            ret, image = cap.read()
-            if not ret:
-                break
-
-            if frame_id % frame_skip != 0:
-                frame_id += 1
-                continue
-
-            # Create frame
-            t_ns = int(frame_id / video_fps * 1e9)
-            frame = Frame.from_array(image, frame_id=frame_id, t_src_ns=t_ns)
-
+        for frame in stream:
             # Run extractors
             observations = {}
             for ext in extractors:
@@ -662,14 +1030,17 @@ def run_debug_session(
                 elif key == ord(" "):
                     cv2.waitKey(0)  # Pause
 
-            frame_id += 1
+            frame_count += 1
 
             # Progress
-            if frame_id % 100 == 0:
-                logger.info(f"Processed {frame_id}/{total_frames} frames")
+            if frame_count % 100 == 0:
+                logger.info(f"Processed {frame_count}/{source_info.frame_count} frames")
 
     finally:
-        cap.release()
+        if vb:
+            vb.disconnect()
+        elif use_legacy:
+            cap.release()
         if writer:
             writer.release()
         if show_window:
@@ -678,4 +1049,4 @@ def run_debug_session(
         for ext in extractors:
             ext.cleanup()
 
-    logger.info(f"Debug session complete. Processed {frame_id} frames.")
+    logger.info(f"Debug session complete. Processed {frame_count} frames.")

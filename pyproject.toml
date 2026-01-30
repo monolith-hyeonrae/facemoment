@@ -6,27 +6,60 @@ requires-python = ">=3.10"
 dependencies = [
     "visualbase",
     "numpy>=1.24.0",
-    "pyqt6>=6.10.2",
+    "opencv-python>=4.8.0",
 ]
 
 [project.optional-dependencies]
+# Development
 dev = [
     "pytest>=7.0.0",
 ]
-ml = [
-    "insightface>=0.7.3",
-    "onnxruntime-gpu>=1.16.0",
-    "ultralytics>=8.0.0",
-    "hsemotion-onnx>=0.3",
+
+# IPC for distributed workers
+zmq = [
+    "pyzmq>=25.0.0",
 ]
-ml-full = [
+
+# CLI/GUI visualization
+cli = [
+    "pyqt6>=6.10.2",
+]
+
+# === Worker-specific dependencies (isolated venvs) ===
+
+# Face detection + expression analysis
+face = [
     "insightface>=0.7.3",
     "onnxruntime-gpu>=1.16.0",
-    "ultralytics>=8.0.0",
+    "hsemotion-onnx>=0.3",
+    "ml-dtypes>=0.5.0",
+]
+
+# Face with PyFeat (slower but more accurate expression)
+face-full = [
+    "insightface>=0.7.3",
+    "onnxruntime-gpu>=1.16.0",
     "py-feat>=0.6.0",
-    "numpy>=1.24.0,<2",
     "pandas>=2.0.0,<3",
-    "scipy>=1.10.0,<1.12",
+    "scipy>=1.10.0",
+    "ml-dtypes>=0.5.0",
+]
+
+# Pose estimation
+pose = [
+    "ultralytics>=8.0.0",
+]
+
+# Hand gesture detection
+gesture = [
+    "mediapipe>=0.10.32",
+]
+
+# === Convenience bundles ===
+
+# All ML backends (for development/testing - may have conflicts!)
+all = [
+    "facemoment[face,pose,gesture,cli]",
 ]
 
 [project.scripts]
@@ -53,4 +86,10 @@ visualbase = { path = "../visualbase", editable = true }
 [tool.uv]
 constraint-dependencies = [
     "opencv-python-headless<0",
+]
+
+# Replace onnxruntime (CPU) with onnxruntime-gpu for GPU acceleration
+# hsemotion-onnx requires onnxruntime, but we want GPU version
+override-dependencies = [
+    "onnxruntime>=1.16.0; extra != 'face' and extra != 'face-full'",
 ]

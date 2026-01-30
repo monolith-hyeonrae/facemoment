@@ -42,6 +42,8 @@ class InsightFaceSCRFD:
         self._det_thresh = det_thresh
         self._app: Optional[object] = None
         self._initialized = False
+        self._device = "cpu"
+        self._actual_provider = "unknown"
 
     def initialize(self, device: str = "cuda:0") -> None:
         """Initialize InsightFace app with SCRFD detector."""
@@ -50,20 +52,36 @@ class InsightFaceSCRFD:
 
         try:
             from insightface.app import FaceAnalysis
+            import onnxruntime as ort
+
+            # Check available ONNX providers
+            available_providers = ort.get_available_providers()
+            logger.info(f"Available ONNX providers: {available_providers}")
 
             # Parse device (insightface uses ctx_id: 0 for GPU, -1 for CPU)
             if device.startswith("cuda"):
                 ctx_id = int(device.split(":")[-1]) if ":" in device else 0
+                if "CUDAExecutionProvider" in available_providers:
+                    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                    self._actual_provider = "CUDA"
+                else:
+                    providers = ["CPUExecutionProvider"]
+                    self._actual_provider = "CPU (CUDA unavailable)"
+                    logger.warning("CUDAExecutionProvider not available, falling back to CPU")
             else:
                 ctx_id = -1
+                providers = ["CPUExecutionProvider"]
+                self._actual_provider = "CPU"
+
+            self._device = device
 
             self._app = FaceAnalysis(
                 name=self._model_name,
-                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+                providers=providers,
             )
             self._app.prepare(ctx_id=ctx_id, det_size=self._det_size)
             self._initialized = True
-            logger.info(f"InsightFace SCRFD initialized on device {device}")
+            logger.info(f"InsightFace SCRFD initialized (provider={self._actual_provider})")
 
         except ImportError:
             raise ImportError(
@@ -129,6 +147,10 @@ class InsightFaceSCRFD:
         self._app = None
         self._initialized = False
         logger.info("InsightFace SCRFD cleaned up")
+
+    def get_provider_info(self) -> str:
+        """Get actual provider being used."""
+        return self._actual_provider
 
 
 class PyFeatBackend:

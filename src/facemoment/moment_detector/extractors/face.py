@@ -2,6 +2,7 @@
 
 from typing import Optional, Dict, List
 import logging
+import time
 
 import numpy as np
 
@@ -17,8 +18,13 @@ from facemoment.moment_detector.extractors.backends.base import (
     ExpressionBackend,
     DetectedFace,
 )
+from facemoment.observability import ObservabilityHub, TraceLevel
+from facemoment.observability.records import FrameExtractRecord, FaceExtractDetail, TimingRecord
 
 logger = logging.getLogger(__name__)
+
+# Get the global observability hub
+_hub = ObservabilityHub.get_instance()
 
 
 class FaceExtractor(BaseExtractor):
@@ -134,6 +140,32 @@ class FaceExtractor(BaseExtractor):
             f"FaceExtractor initialized (expression={backend_name})"
         )
 
+    def get_backend_info(self) -> Dict[str, str]:
+        """Get information about current backends for profiling.
+
+        Returns:
+            Dict with backend names and device info.
+        """
+        info = {}
+        if self._face_backend is not None:
+            backend_name = type(self._face_backend).__name__
+            # Get actual provider info if available
+            if hasattr(self._face_backend, 'get_provider_info'):
+                provider = self._face_backend.get_provider_info()
+                info["detection"] = f"{backend_name} [{provider}]"
+            else:
+                info["detection"] = f"{backend_name} ({self._device})"
+        else:
+            info["detection"] = "not initialized"
+
+        if self._expression_backend is not None:
+            backend_name = type(self._expression_backend).__name__
+            info["expression"] = backend_name
+        else:
+            info["expression"] = "disabled"
+
+        return info
+
     def cleanup(self) -> None:
         """Release backend resources."""
         if self._face_backend is not None:
@@ -159,25 +191,40 @@ class FaceExtractor(BaseExtractor):
         if self._face_backend is None:
             raise RuntimeError("Extractor not initialized. Call initialize() first.")
 
+        # Start timing (always measure for profile mode)
+        start_ns = time.perf_counter_ns()
+
         image = frame.data
         h, w = image.shape[:2]
 
-        # Detect faces
+        # Component timing
+        timing = {}
+
+        # Detect faces (with timing)
+        detect_start = time.perf_counter_ns()
         detected_faces = self._face_backend.detect(image)
+        timing["detect_ms"] = (time.perf_counter_ns() - detect_start) / 1_000_000
 
         if not detected_faces:
+            # Emit timing record
+            if _hub.enabled:
+                processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+                self._emit_extract_record(frame, 0, 0.0, processing_ms, {})
             return Observation(
                 source=self.name,
                 frame_id=frame.frame_id,
                 t_ns=frame.t_src_ns,
                 signals={"face_count": 0, "max_expression": 0.0},
                 faces=[],
+                timing=timing,
             )
 
-        # Analyze expressions
+        # Analyze expressions (with timing)
         expressions = []
         if self._expression_backend is not None:
+            expr_start = time.perf_counter_ns()
             expressions = self._expression_backend.analyze(image, detected_faces)
+            timing["expression_ms"] = (time.perf_counter_ns() - expr_start) / 1_000_000
 
         # Assign face IDs (simple IoU-based tracking)
         face_ids = self._assign_face_ids(detected_faces)
@@ -244,6 +291,36 @@ class FaceExtractor(BaseExtractor):
         # Update tracking state
         self._prev_faces = [(f.face_id, detected_faces[i].bbox) for i, f in enumerate(face_observations)]
 
+        # Emit observability records
+        if _hub.enabled:
+            processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+            self._emit_extract_record(
+                frame,
+                len(face_observations),
+                max_expression,
+                processing_ms,
+                {"face_count": len(face_observations), "max_expression": max_expression},
+            )
+            # Emit detailed per-face records at VERBOSE level
+            if _hub.is_level_enabled(TraceLevel.VERBOSE):
+                for face_obs in face_observations:
+                    _hub.emit(FaceExtractDetail(
+                        frame_id=frame.frame_id,
+                        face_id=face_obs.face_id,
+                        confidence=face_obs.confidence,
+                        bbox=face_obs.bbox,
+                        yaw=face_obs.yaw,
+                        pitch=face_obs.pitch,
+                        roll=face_obs.roll,
+                        expression=face_obs.expression,
+                        inside_frame=face_obs.inside_frame,
+                        area_ratio=face_obs.area_ratio,
+                        center_distance=face_obs.center_distance,
+                    ))
+
+        # Record total timing
+        timing["total_ms"] = (time.perf_counter_ns() - start_ns) / 1_000_000
+
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
@@ -253,6 +330,7 @@ class FaceExtractor(BaseExtractor):
                 "max_expression": max_expression,
             },
             faces=face_observations,
+            timing=timing,
         )
 
     def _assign_face_ids(self, faces: List[DetectedFace]) -> List[int]:
@@ -337,3 +415,37 @@ class FaceExtractor(BaseExtractor):
             return 0.0
 
         return inter_area / union_area
+
+    def _emit_extract_record(
+        self,
+        frame: Frame,
+        face_count: int,
+        max_expression: float,
+        processing_ms: float,
+        signals: Dict[str, float],
+    ) -> None:
+        """Emit extraction observability records.
+
+        Args:
+            frame: The processed frame.
+            face_count: Number of faces detected.
+            max_expression: Maximum expression value.
+            processing_ms: Processing time in milliseconds.
+            signals: Signal dictionary.
+        """
+        threshold_ms = 50.0
+        _hub.emit(FrameExtractRecord(
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            source=self.name,
+            face_count=face_count,
+            processing_ms=processing_ms,
+            signals=signals if _hub.is_level_enabled(TraceLevel.VERBOSE) else {},
+        ))
+        _hub.emit(TimingRecord(
+            frame_id=frame.frame_id,
+            component=self.name,
+            processing_ms=processing_ms,
+            threshold_ms=threshold_ms,
+            is_slow=processing_ms > threshold_ms,
+        ))
