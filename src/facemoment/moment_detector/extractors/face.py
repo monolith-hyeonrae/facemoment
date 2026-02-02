@@ -62,10 +62,24 @@ class FaceExtractor(BaseExtractor):
         device: str = "cuda:0",
         track_faces: bool = True,
         iou_threshold: float = 0.5,
+        roi: Optional[tuple[float, float, float, float]] = None,
     ):
+        """Initialize FaceExtractor.
+
+        Args:
+            face_backend: Face detection backend.
+            expression_backend: Expression analysis backend.
+            device: Device for inference.
+            track_faces: Enable face tracking.
+            iou_threshold: IoU threshold for tracking.
+            roi: Region of interest as (x1, y1, x2, y2) in normalized coords [0-1].
+                 Default (0.3, 0.1, 0.7, 0.6) = center 40% width, top 50% height.
+                 Set to (0, 0, 1, 1) for full frame.
+        """
         self._device = device
         self._track_faces = track_faces
         self._iou_threshold = iou_threshold
+        self._roi = roi if roi is not None else (0.3, 0.1, 0.7, 0.6)
         self._initialized = False
 
         # Lazy import backends to avoid import errors when dependencies missing
@@ -80,6 +94,20 @@ class FaceExtractor(BaseExtractor):
     def name(self) -> str:
         return "face"
 
+    @property
+    def roi(self) -> tuple[float, float, float, float]:
+        """Get current ROI as (x1, y1, x2, y2) in normalized coords [0-1]."""
+        return self._roi
+
+    @roi.setter
+    def roi(self, value: tuple[float, float, float, float]) -> None:
+        """Set ROI as (x1, y1, x2, y2) in normalized coords [0-1]."""
+        x1, y1, x2, y2 = value
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError(f"Invalid ROI: {value}. Must be (x1, y1, x2, y2) with 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1")
+        self._roi = value
+        logger.info(f"FaceExtractor ROI set to {value}")
+
     def initialize(self) -> None:
         """Initialize face detection and expression backends."""
         if self._initialized:
@@ -90,7 +118,7 @@ class FaceExtractor(BaseExtractor):
         if self._expression_backend is None:
             # Try HSEmotion first (fast)
             try:
-                from facemoment.moment_detector.extractors.backends.face_backends import (
+                from facemoment.moment_detector.extractors.backends.hsemotion import (
                     HSEmotionBackend,
                 )
 
@@ -107,7 +135,7 @@ class FaceExtractor(BaseExtractor):
             # ONNX runtime state that can break py-feat imports
             if self._expression_backend is None:
                 try:
-                    from facemoment.moment_detector.extractors.backends.face_backends import (
+                    from facemoment.moment_detector.extractors.backends.pyfeat import (
                         PyFeatBackend,
                     )
 
@@ -126,7 +154,7 @@ class FaceExtractor(BaseExtractor):
 
         # Now initialize face backend (InsightFace)
         if self._face_backend is None:
-            from facemoment.moment_detector.extractors.backends.face_backends import (
+            from facemoment.moment_detector.extractors.backends.insightface import (
                 InsightFaceSCRFD,
             )
 
@@ -136,8 +164,12 @@ class FaceExtractor(BaseExtractor):
 
         self._initialized = True
         backend_name = type(self._expression_backend).__name__ if self._expression_backend else "disabled"
+        roi_pct = (
+            f"{int(self._roi[0]*100)}%-{int(self._roi[2]*100)}% x "
+            f"{int(self._roi[1]*100)}%-{int(self._roi[3]*100)}%"
+        )
         logger.info(
-            f"FaceExtractor initialized (expression={backend_name})"
+            f"FaceExtractor initialized (expression={backend_name}, ROI={roi_pct})"
         )
 
     def get_backend_info(self) -> Dict[str, str]:
@@ -179,11 +211,16 @@ class FaceExtractor(BaseExtractor):
 
         logger.info("FaceExtractor cleaned up")
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def extract(
+        self,
+        frame: Frame,
+        deps: Optional[Dict[str, "Observation"]] = None,
+    ) -> Optional[Observation]:
         """Extract face observations from a frame.
 
         Args:
             frame: Input frame to analyze.
+            deps: Optional dependencies (not used by this composite extractor).
 
         Returns:
             Observation with detected faces and their features.
@@ -214,7 +251,13 @@ class FaceExtractor(BaseExtractor):
                 source=self.name,
                 frame_id=frame.frame_id,
                 t_ns=frame.t_src_ns,
-                signals={"face_count": 0, "max_expression": 0.0},
+                signals={
+                    "face_count": 0,
+                    "max_expression": 0.0,
+                    "expression_happy": 0.0,
+                    "expression_angry": 0.0,
+                    "expression_neutral": 1.0,
+                },
                 faces=[],
                 timing=timing,
             )
@@ -232,6 +275,9 @@ class FaceExtractor(BaseExtractor):
         # Convert to FaceObservations
         face_observations = []
         max_expression = 0.0
+        max_happy = 0.0
+        max_angry = 0.0
+        min_neutral = 1.0  # Track minimum neutral (more interesting = less neutral)
 
         for i, (face, face_id) in enumerate(zip(detected_faces, face_ids)):
             # Get expression if available
@@ -250,6 +296,11 @@ class FaceExtractor(BaseExtractor):
             center_y = norm_y + norm_h / 2
             center_distance = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5
 
+            # ROI filter: skip faces with center outside ROI
+            roi_x1, roi_y1, roi_x2, roi_y2 = self._roi
+            if not (roi_x1 <= center_x <= roi_x2 and roi_y1 <= center_y <= roi_y2):
+                continue
+
             # Check if face is fully inside frame (with small margin)
             margin = 0.02
             inside_frame = (
@@ -261,6 +312,9 @@ class FaceExtractor(BaseExtractor):
 
             # Expression intensity
             expr_intensity = 0.0
+            face_happy = 0.0
+            face_angry = 0.0
+            face_neutral = 1.0
             signals: Dict[str, float] = {}
 
             if expression is not None:
@@ -271,7 +325,15 @@ class FaceExtractor(BaseExtractor):
                 for em_name, em_val in expression.emotions.items():
                     signals[f"em_{em_name}"] = em_val
 
+                # Track individual emotions
+                face_happy = expression.emotions.get("happy", 0.0)
+                face_angry = expression.emotions.get("angry", 0.0)
+                face_neutral = expression.emotions.get("neutral", 1.0)
+
             max_expression = max(max_expression, expr_intensity)
+            max_happy = max(max_happy, face_happy)
+            max_angry = max(max_angry, face_angry)
+            min_neutral = min(min_neutral, face_neutral)
 
             face_obs = FaceObservation(
                 face_id=face_id,
@@ -328,6 +390,9 @@ class FaceExtractor(BaseExtractor):
             signals={
                 "face_count": len(face_observations),
                 "max_expression": max_expression,
+                "expression_happy": max_happy,
+                "expression_angry": max_angry,
+                "expression_neutral": min_neutral,
             },
             faces=face_observations,
             timing=timing,

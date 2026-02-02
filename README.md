@@ -1,141 +1,156 @@
 # facemoment
 
-Face moment detection and highlight clip extraction for 981park.
-
-## Overview
-
-Part of the Portrait981 system (A-B*-C architecture):
-
-```
-Camera → [A: Ingest] → [B*: Feature Extractors] → [C: Fusion] → Highlights
-              ↓                    ↓                    ↓
-          Ring Buffer         Observations          Triggers
-              ↓                                         ↓
-           4K Clips ←─────────────────────────────────────
-```
-
-This package implements the B* (Feature Extractors) and C (Fusion Engine) components.
-
-## Features
-
-- **Face Extraction**: InsightFace SCRFD for detection, HSEmotion for expression analysis
-- **Pose Extraction**: YOLO-Pose for body keypoints and gesture detection
-- **Quality Analysis**: Blur detection, brightness assessment
-- **Highlight Fusion**: Multi-signal scoring for expression spikes, head turns, hand waves
-- **Clip Extraction**: Integrates with visualbase for trigger-based clip saving
-
-## Installation
-
-```bash
-pip install facemoment
-```
-
-For ML features (recommended):
-
-```bash
-pip install facemoment[ml]
-```
-
-Or with uv:
-
-```bash
-uv add facemoment --extra ml
-```
+Face moment detection and highlight clip extraction.
 
 ## Quick Start
 
 ```python
+import facemoment as fm
+
+# Process a video (one-liner)
+triggers = fm.run("video.mp4")
+print(f"Found {len(triggers)} highlights")
+```
+
+### With Options
+
+```python
+# Adjust settings
+triggers = fm.run(
+    "video.mp4",
+    fps=10,           # frames per second
+    cooldown=3.0,     # seconds between triggers
+)
+
+# With callback
+fm.run("video.mp4", on_trigger=lambda t: print(f"Trigger: {t.label}"))
+```
+
+### With Clip Extraction
+
+```python
+# Analyze and extract clips
+result = fm.analyze("video.mp4", output_dir="./clips")
+print(f"{len(result.triggers)} triggers, {result.clips_extracted} clips")
+```
+
+## Installation
+
+```bash
+# Basic
+pip install facemoment
+
+# With ML backends (recommended)
+pip install facemoment[all]
+
+# Or with uv
+uv pip install -e ".[all]"
+```
+
+## API Reference
+
+| Function | Description |
+|----------|-------------|
+| `fm.run(video)` | Process video, return triggers |
+| `fm.analyze(video, output_dir)` | Process video with stats and clip extraction |
+
+### Parameters
+
+```python
+fm.run(
+    video,                    # Path to video file
+    extractors=None,          # ["face", "pose", "gesture", "quality"] or None for auto
+    fps=10,                   # Frames per second to process
+    cooldown=2.0,             # Seconds between triggers
+    use_ml=True,              # Use ML extractors (False for dummy)
+    on_trigger=None,          # Callback function
+)
+```
+
+---
+
+## Advanced Usage
+
+For complex use cases, use the class-based API:
+
+```python
 from facemoment import MomentDetector
-from facemoment.moment_detector.extractors import FaceExtractor, PoseExtractor, QualityExtractor
+from facemoment.moment_detector.extractors import FaceExtractor, PoseExtractor
 from facemoment.moment_detector.fusion import HighlightFusion
 
-# Create detector with extractors
 detector = MomentDetector(
-    extractors=[
-        FaceExtractor(),
-        PoseExtractor(),
-        QualityExtractor(),
-    ],
-    fusion=HighlightFusion(),
+    extractors=[FaceExtractor(), PoseExtractor()],
+    fusion=HighlightFusion(cooldown_sec=3.0),
     clip_output_dir="./clips",
 )
 
-# Process video file
 clips = detector.process_file("video.mp4", fps=10)
-
-for clip in clips:
-    if clip.success:
-        print(f"Saved: {clip.output_path} ({clip.duration_sec:.2f}s)")
 ```
 
 ## CLI Commands
 
 ```bash
-# Process video and extract highlight clips
-facemoment process video.mp4 --fps 10 --output-dir ./clips
+# Process video
+facemoment process video.mp4 -o ./clips
 
-# Debug face extractor
-facemoment debug-face video.mp4 --fps 10
+# Debug with visualization
+facemoment debug video.mp4 -e face      # face only
+facemoment debug video.mp4 -e face,pose # multiple
+facemoment debug video.mp4 --no-ml      # dummy mode
 
-# Debug pose extractor
-facemoment debug-pose video.mp4 --fps 10
-
-# Benchmark extractor performance
-facemoment benchmark video.mp4 --frames 100
-
-# Run interactive debug session
-facemoment debug video.mp4 --fps 10
+# System info
+facemoment info -v
 ```
 
 ## Architecture
 
+Part of the Portrait981 system (A-B*-C architecture):
+
 ```
-facemoment/
-├── moment_detector/
-│   ├── detector.py        # MomentDetector main class
-│   ├── extractors/
-│   │   ├── base.py        # BaseExtractor interface
-│   │   ├── face.py        # FaceExtractor
-│   │   ├── pose.py        # PoseExtractor
-│   │   ├── quality.py     # QualityExtractor
-│   │   └── backends/      # ML backend implementations
-│   │       ├── face_backends.py   # InsightFace, HSEmotion, PyFeat
-│   │       └── pose_backends.py   # YOLO-Pose
-│   └── fusion/
-│       ├── base.py        # BaseFusion interface
-│       └── highlight.py   # HighlightFusion
-├── tools/
-│   └── visualizer.py      # Debug visualization
-└── cli.py                 # Command-line interface
+┌─────────────────────────────────────────────────────────────┐
+│  fm.run("video.mp4")                                        │
+│                                                             │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐   │
+│  │   Source    │ ──► │  Extractors │ ──► │   Fusion    │   │
+│  │  (frames)   │     │ face, pose  │     │ (triggers)  │   │
+│  └─────────────┘     └─────────────┘     └─────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+## Extractors
+
+| Extractor | Backend | Description |
+|-----------|---------|-------------|
+| `face` | InsightFace + HSEmotion | Face detection + expression |
+| `pose` | YOLO-Pose | Body keypoints + gestures |
+| `gesture` | MediaPipe | Hand gestures (V-sign, thumbsup) |
+| `quality` | OpenCV | Blur, brightness, contrast |
+
+## Trigger Types
+
+| Trigger | Signal | Description |
+|---------|--------|-------------|
+| expression_spike | Adaptive EWMA | Happy emotion spike (sustained) |
+| head_turn | Yaw velocity | Fast head rotation |
+| hand_wave | Pose detection | Waving gesture |
+| gesture_vsign | MediaPipe | V-sign hand pose |
 
 ## Dependencies
 
 Core:
 - Python >= 3.10
-- NumPy >= 1.24.0
-- visualbase (for clip extraction)
+- NumPy, OpenCV
+- visualbase, visualpath
 
-ML (optional):
-- InsightFace >= 0.7.3 (face detection)
-- ONNX Runtime GPU >= 1.16.0
-- Ultralytics >= 8.0.0 (pose detection)
-- hsemotion-onnx >= 0.3 (expression analysis, fast)
-- Py-Feat >= 0.6.0 (expression + AU analysis, slower)
-
-## Trigger Types
-
-| Trigger | Signal | Threshold |
-|---------|--------|-----------|
-| Expression Spike | Z-score vs EWMA baseline | > 2.0 |
-| Head Turn | Yaw velocity | > 30 deg/sec |
-| Hand Wave | Pose gesture detection | > 0.7 |
+ML (optional extras):
+- `[face]`: InsightFace, HSEmotion, ONNX Runtime
+- `[pose]`: Ultralytics (YOLO)
+- `[gesture]`: MediaPipe
 
 ## Related Packages
 
-- **visualbase**: Media streaming and clip extraction platform
-- **appearance-vault**: (Future) Member-based clip storage
-- **reportrait**: (Future) AI image/video reinterpretation
+- **visualbase**: Media streaming and clip extraction
+- **visualpath**: Video analysis pipeline platform
 
 ## License
 

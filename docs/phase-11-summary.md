@@ -325,13 +325,13 @@ facemoment debug video.mp4 -e raw        # 원본만 (분석 없음)
 ## 다음 단계
 
 1. **portrait981에서 적용**: worker별 독립 venv 실행 구조
-2. **실제 영상 테스트**: 고카트 영상으로 threshold 튜닝
+2. **실제 영상 테스트**: GR차량 영상으로 threshold 튜닝
 3. **analysiscore 분리**: 플랫폼 로직 별도 패키지화 (Phase 12)
 
 ---
 
 ## 관련 문서
 
-- [Architecture Vision](./architecture-vision.md): 플러그인 생태계 비전
-- [Problems and Solutions](./problems-and-solutions.md): 알고리즘 문서
-- [Stream Synchronization](./stream-synchronization.md): 스트림 동기화
+- [visualpath Architecture](../../visualpath/docs/architecture.md): 플러그인 생태계 아키텍처
+- [Problems and Solutions](./problems-and-solutions.md): 981파크 분석 알고리즘
+- [Stream Synchronization](../../visualpath/docs/stream-synchronization.md): 스트림 동기화 (visualpath)

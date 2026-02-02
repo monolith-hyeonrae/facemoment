@@ -1,64 +1,34 @@
-"""Trace record data classes for observability.
+"""Trace record data classes for FaceMoment observability.
 
-This module defines all the trace record types used throughout
-the FaceMoment observability system.
+This module defines FaceMoment-specific trace record types.
+Generic record types are re-exported from visualpath.observability.
 
 Record Categories:
-- Extraction records: Frame-level extraction results
+- Extraction records: Frame-level extraction results (face-specific)
 - Gate records: Quality gate state changes
 - Trigger records: Trigger decisions and firings
-- Timing records: Component performance metrics
-- Sync records: Stream synchronization events
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
-import time
-import json
+from dataclasses import dataclass, field
+from typing import Dict, List, Any
 
-
-# Forward reference for TraceLevel
-from facemoment.observability import TraceLevel
-
-
-@dataclass
-class TraceRecord:
-    """Base class for all trace records.
-
-    All trace records have:
-    - record_type: String identifying the record type
-    - timestamp_ns: When the record was created (monotonic)
-    - min_level: Minimum trace level required to emit this record
-
-    Subclasses should set record_type as a class variable.
-    """
-    record_type: str = field(default="base", init=False)
-    timestamp_ns: int = field(default_factory=lambda: time.perf_counter_ns())
-    min_level: TraceLevel = field(default=TraceLevel.NORMAL, repr=False)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert record to dictionary.
-
-        Returns:
-            Dictionary representation suitable for JSON serialization.
-        """
-        d = asdict(self)
-        # Remove min_level from output (internal use only)
-        d.pop("min_level", None)
-        return d
-
-    def to_json(self) -> str:
-        """Convert record to JSON string.
-
-        Returns:
-            JSON-serialized record.
-        """
-        return json.dumps(self.to_dict(), default=str)
+# Import and re-export base types from visualpath
+from visualpath.observability import TraceLevel
+from visualpath.observability.records import (
+    TraceRecord,
+    TimingRecord,
+    FrameDropRecord,
+    SyncDelayRecord,
+    FPSRecord,
+    SessionStartRecord,
+    SessionEndRecord,
+)
 
 
 # =============================================================================
-# Extraction Records
+# FaceMoment-specific Extraction Records
 # =============================================================================
+
 
 @dataclass
 class FrameExtractRecord(TraceRecord):
@@ -121,6 +91,7 @@ class FaceExtractDetail(TraceRecord):
 # Gate Records
 # =============================================================================
 
+
 @dataclass
 class GateChangeRecord(TraceRecord):
     """Record of quality gate state transition.
@@ -175,6 +146,7 @@ class GateConditionRecord(TraceRecord):
 # =============================================================================
 # Trigger Records
 # =============================================================================
+
 
 @dataclass
 class TriggerCandidate:
@@ -245,132 +217,16 @@ class TriggerFireRecord(TraceRecord):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-# =============================================================================
-# Timing Records
-# =============================================================================
-
-@dataclass
-class TimingRecord(TraceRecord):
-    """Component processing time record.
-
-    Emitted after each frame processing to track performance.
-    """
-    record_type: str = field(default="timing", init=False)
-    min_level: TraceLevel = field(default=TraceLevel.NORMAL, repr=False)
-
-    frame_id: int = 0
-    component: str = ""  # "face", "pose", "gesture", "fusion", "orchestrator"
-
-    processing_ms: float = 0.0
-    queue_depth: int = 0
-
-    # Thresholds for warnings
-    threshold_ms: float = 50.0  # Default warning threshold
-    is_slow: bool = False
-
-
-@dataclass
-class FrameDropRecord(TraceRecord):
-    """Record of dropped frames.
-
-    Emitted when frames are dropped due to processing delays.
-    """
-    record_type: str = field(default="frame_drop", init=False)
-
-    dropped_frame_ids: List[int] = field(default_factory=list)
-    reason: str = ""  # "timeout", "backpressure", "queue_full"
-
-    # Context
-    queue_depth: int = 0
-    processing_ms: float = 0.0
-
-
-@dataclass
-class SyncDelayRecord(TraceRecord):
-    """Record of observation synchronization delay.
-
-    Emitted when fusion waits for observations from multiple extractors.
-    """
-    record_type: str = field(default="sync_delay", init=False)
-
-    frame_id: int = 0
-    expected_ns: int = 0
-    actual_ns: int = 0
-    delay_ms: float = 0.0
-
-    waiting_for: List[str] = field(default_factory=list)  # ["gesture", "pose"]
-
-
-@dataclass
-class FPSRecord(TraceRecord):
-    """Periodic FPS and performance summary.
-
-    Emitted periodically (e.g., every 100 frames) with aggregate stats.
-    """
-    record_type: str = field(default="fps_summary", init=False)
-    min_level: TraceLevel = field(default=TraceLevel.NORMAL, repr=False)
-
-    # Frame range
-    start_frame: int = 0
-    end_frame: int = 0
-    frame_count: int = 0
-
-    # FPS
-    actual_fps: float = 0.0
-    target_fps: float = 0.0
-    fps_ratio: float = 0.0  # actual / target
-
-    # Latency stats (ms)
-    avg_latency_ms: float = 0.0
-    max_latency_ms: float = 0.0
-    p95_latency_ms: float = 0.0
-
-    # Per-component average times
-    component_avg_ms: Dict[str, float] = field(default_factory=dict)
-
-    # Issues
-    dropped_frames: int = 0
-    slow_frames: int = 0  # Frames exceeding threshold
-
-
-# =============================================================================
-# Session Records
-# =============================================================================
-
-@dataclass
-class SessionStartRecord(TraceRecord):
-    """Record emitted when a processing session starts."""
-    record_type: str = field(default="session_start", init=False)
-    min_level: TraceLevel = field(default=TraceLevel.MINIMAL, repr=False)
-
-    session_id: str = ""
-    source_path: str = ""
-    target_fps: float = 0.0
-
-    # Configuration
-    extractors: List[str] = field(default_factory=list)
-    fusion_params: Dict[str, Any] = field(default_factory=dict)
-    trace_level: str = ""
-
-
-@dataclass
-class SessionEndRecord(TraceRecord):
-    """Record emitted when a processing session ends."""
-    record_type: str = field(default="session_end", init=False)
-    min_level: TraceLevel = field(default=TraceLevel.MINIMAL, repr=False)
-
-    session_id: str = ""
-    duration_sec: float = 0.0
-
-    # Summary stats
-    total_frames: int = 0
-    total_triggers: int = 0
-    total_dropped: int = 0
-    avg_fps: float = 0.0
-
-
 __all__ = [
+    # Re-exported from visualpath
     "TraceRecord",
+    "TimingRecord",
+    "FrameDropRecord",
+    "SyncDelayRecord",
+    "FPSRecord",
+    "SessionStartRecord",
+    "SessionEndRecord",
+    # FaceMoment-specific
     "FrameExtractRecord",
     "FaceExtractDetail",
     "GateChangeRecord",
@@ -378,10 +234,4 @@ __all__ = [
     "TriggerCandidate",
     "TriggerDecisionRecord",
     "TriggerFireRecord",
-    "TimingRecord",
-    "FrameDropRecord",
-    "SyncDelayRecord",
-    "FPSRecord",
-    "SessionStartRecord",
-    "SessionEndRecord",
 ]

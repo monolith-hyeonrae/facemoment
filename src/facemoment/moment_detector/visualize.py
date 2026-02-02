@@ -1,321 +1,384 @@
-"""Visualization utilities for debugging extractors and fusion."""
+"""Visualization utilities for debugging extractors and fusion.
 
-from typing import Optional, List, Tuple, Iterator, Dict
+Uses the supervision library for annotations.
+"""
+
+from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass
-from pathlib import Path
-from collections import deque
 import logging
-import time
 
 import cv2
 import numpy as np
+import supervision as sv
 
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
+from facemoment.moment_detector.extractors.types import KeypointIndex
+from facemoment.moment_detector.extractors.outputs import PoseOutput
 from facemoment.moment_detector.fusion.base import FusionResult
 
 logger = logging.getLogger(__name__)
 
 
+# Colors
+COLOR_GREEN = sv.Color.from_hex("#00FF00")
+COLOR_RED = sv.Color.from_hex("#FF0000")
+COLOR_YELLOW = sv.Color.from_hex("#FFFF00")
+COLOR_GRAY = sv.Color.from_hex("#808080")
+COLOR_WHITE = sv.Color.from_hex("#FFFFFF")
+COLOR_DARK = sv.Color.from_hex("#282828")
+
+# Emotion colors (BGR for cv2 drawing)
+COLOR_HAPPY_BGR = (0, 255, 255)
+COLOR_ANGRY_BGR = (0, 0, 255)
+COLOR_NEUTRAL_BGR = (200, 200, 200)
+COLOR_DARK_BGR = (40, 40, 40)
+COLOR_WHITE_BGR = (255, 255, 255)
+COLOR_RED_BGR = (0, 0, 255)
+COLOR_GREEN_BGR = (0, 255, 0)
+COLOR_GRAY_BGR = (128, 128, 128)
+
+# Role colors for face classification (BGR format for OpenCV)
+COLOR_MAIN_BGR = (0, 255, 0)         # Green - main subject
+COLOR_PASSENGER_BGR = (0, 165, 255)  # Orange - passenger (BGR: blue=0, green=165, red=255)
+COLOR_TRANSIENT_BGR = (0, 255, 255)  # Yellow - transient (BGR: blue=0, green=255, red=255)
+COLOR_NOISE_BGR = (128, 128, 128)    # Gray - noise
+
+# Pose skeleton colors (BGR)
+COLOR_SKELETON_BGR = (255, 200, 100)  # Light blue - skeleton lines
+COLOR_KEYPOINT_BGR = (0, 255, 255)    # Yellow - keypoints
+
+
 @dataclass
 class VisualizationConfig:
     """Configuration for visualization."""
-
-    # Colors (BGR format)
-    face_box_color: Tuple[int, int, int] = (0, 255, 0)  # Green
-    face_box_color_bad: Tuple[int, int, int] = (0, 0, 255)  # Red
-    pose_color: Tuple[int, int, int] = (255, 255, 0)  # Cyan
-    hand_raised_color: Tuple[int, int, int] = (0, 255, 255)  # Yellow
-    quality_good_color: Tuple[int, int, int] = (0, 255, 0)  # Green
-    quality_bad_color: Tuple[int, int, int] = (0, 0, 255)  # Red
-    trigger_color: Tuple[int, int, int] = (0, 0, 255)  # Red
-    gate_open_color: Tuple[int, int, int] = (0, 255, 0)  # Green
-    gate_closed_color: Tuple[int, int, int] = (128, 128, 128)  # Gray
-
-    # Drawing params
-    font: int = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale: float = 0.5
-    thickness: int = 2
-    text_color: Tuple[int, int, int] = (255, 255, 255)
-
-    # Panel sizes
-    info_panel_width: int = 300
     graph_height: int = 100
 
 
 class ExtractorVisualizer:
-    """Visualizer for individual extractor outputs."""
+    """Visualizer for extractor outputs using supervision."""
 
     def __init__(self, config: Optional[VisualizationConfig] = None):
         self.config = config or VisualizationConfig()
 
-    def draw_face_observation(
-        self,
-        image: np.ndarray,
-        observation: Observation,
-        show_details: bool = True,
-    ) -> np.ndarray:
-        """Draw face observations on image.
+        # Color palette: 0=green (good), 1=red (bad)
+        palette = sv.ColorPalette.from_hex(["#00FF00", "#FF0000"])
+        self._box_annotator = sv.BoxAnnotator(thickness=2, color=palette, color_lookup=sv.ColorLookup.CLASS)
+        self._label_annotator = sv.LabelAnnotator(text_scale=0.4, text_thickness=1, text_padding=3,
+                                                   color=palette, color_lookup=sv.ColorLookup.CLASS)
 
-        Args:
-            image: Input BGR image.
-            observation: Observation from FaceExtractor.
-            show_details: Whether to show detailed info per face.
-
-        Returns:
-            Annotated image.
-        """
+    def draw_face_observation(self, image: np.ndarray, observation: Observation) -> np.ndarray:
+        """Draw face observations on image."""
         output = image.copy()
         h, w = output.shape[:2]
-        cfg = self.config
+
+        if not observation.faces:
+            self._draw_summary(output, observation)
+            return output
+
+        # Build detections
+        xyxy, confidences, class_ids, labels = [], [], [], []
 
         for face in observation.faces:
-            # Convert normalized bbox to pixels
-            x = int(face.bbox[0] * w)
-            y = int(face.bbox[1] * h)
-            bw = int(face.bbox[2] * w)
-            bh = int(face.bbox[3] * h)
+            x1, y1 = int(face.bbox[0] * w), int(face.bbox[1] * h)
+            x2, y2 = int((face.bbox[0] + face.bbox[2]) * w), int((face.bbox[1] + face.bbox[3]) * h)
+            xyxy.append([x1, y1, x2, y2])
+            confidences.append(face.confidence)
 
-            # Choose color based on gate conditions
-            is_good = (
-                face.confidence >= 0.7
-                and abs(face.yaw) <= 25
-                and abs(face.pitch) <= 20
-                and face.inside_frame
-            )
-            color = cfg.face_box_color if is_good else cfg.face_box_color_bad
+            # Gate condition check for color
+            is_good = (face.confidence >= 0.7 and abs(face.yaw) <= 25 and
+                       abs(face.pitch) <= 20 and face.inside_frame)
+            class_ids.append(0 if is_good else 1)
 
-            # Draw bounding box
-            cv2.rectangle(output, (x, y), (x + bw, y + bh), color, cfg.thickness)
+            # Label with emotions
+            happy = face.signals.get("em_happy", 0.0)
+            angry = face.signals.get("em_angry", 0.0)
+            labels.append(f"ID:{face.face_id} H:{happy:.2f} A:{angry:.2f}")
 
-            if show_details:
-                # Draw face ID
-                cv2.putText(
-                    output,
-                    f"ID:{face.face_id}",
-                    (x, y - 10),
-                    cfg.font,
-                    cfg.font_scale,
-                    color,
-                    1,
-                )
-
-                # Draw info box
-                info_lines = [
-                    f"conf: {face.confidence:.2f}",
-                    f"yaw: {face.yaw:.1f}",
-                    f"pitch: {face.pitch:.1f}",
-                    f"expr: {face.expression:.2f}",
-                ]
-
-                for i, line in enumerate(info_lines):
-                    cv2.putText(
-                        output,
-                        line,
-                        (x + bw + 5, y + 15 + i * 18),
-                        cfg.font,
-                        cfg.font_scale * 0.8,
-                        cfg.text_color,
-                        1,
-                    )
-
-                # Draw expression bar
-                bar_x = x
-                bar_y = y + bh + 5
-                bar_w = bw
-                bar_h = 10
-                expr_w = int(bar_w * face.expression)
-
-                cv2.rectangle(output, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (50, 50, 50), -1)
-                cv2.rectangle(output, (bar_x, bar_y), (bar_x + expr_w, bar_y + bar_h), (0, 255, 255), -1)
-
-        # Draw summary
-        face_count = len(observation.faces)
-        max_expr = observation.signals.get("max_expression", 0)
-        cv2.putText(
-            output,
-            f"Faces: {face_count} | Max Expr: {max_expr:.2f}",
-            (10, 25),
-            cfg.font,
-            cfg.font_scale,
-            cfg.text_color,
-            1,
+        detections = sv.Detections(
+            xyxy=np.array(xyxy),
+            confidence=np.array(confidences),
+            class_id=np.array(class_ids),
         )
 
+        output = self._box_annotator.annotate(output, detections)
+        output = self._label_annotator.annotate(output, detections, labels=labels)
+
+        # Emotion bars below faces
+        for i, face in enumerate(observation.faces):
+            self._draw_emotion_bars(output, face, xyxy[i][0], xyxy[i][3] + 5, xyxy[i][2] - xyxy[i][0])
+
+        self._draw_summary(output, observation)
         return output
 
-    def draw_pose_observation(
-        self,
-        image: np.ndarray,
-        observation: Observation,
-        show_skeleton: bool = True,
-    ) -> np.ndarray:
-        """Draw pose observations on image.
-
-        Args:
-            image: Input BGR image.
-            observation: Observation from PoseExtractor.
-            show_skeleton: Whether to draw skeleton connections.
-
-        Returns:
-            Annotated image.
-        """
-        output = image.copy()
-        cfg = self.config
-
-        # COCO skeleton connections for upper body
-        skeleton = [
-            (5, 6),  # shoulders
-            (5, 7),  # left shoulder -> elbow
-            (7, 9),  # left elbow -> wrist
-            (6, 8),  # right shoulder -> elbow
-            (8, 10),  # right elbow -> wrist
-            (5, 11),  # left shoulder -> hip
-            (6, 12),  # right shoulder -> hip
-            (11, 12),  # hips
+    def _draw_emotion_bars(self, image: np.ndarray, face: FaceObservation, x: int, y: int, width: int) -> None:
+        """Draw 3 emotion bars."""
+        bar_h, gap = 6, 2
+        emotions = [
+            (face.signals.get("em_happy", 0.0), COLOR_HAPPY_BGR),
+            (face.signals.get("em_angry", 0.0), COLOR_ANGRY_BGR),
+            (face.signals.get("em_neutral", 0.0), COLOR_NEUTRAL_BGR),
         ]
+        for i, (value, color) in enumerate(emotions):
+            ey = y + i * (bar_h + gap)
+            cv2.rectangle(image, (x, ey), (x + width, ey + bar_h), COLOR_DARK_BGR, -1)
+            cv2.rectangle(image, (x, ey), (x + int(width * min(1.0, value)), ey + bar_h), color, -1)
 
-        # Check if we have keypoints in metadata
-        keypoints_list = observation.metadata.get("keypoints", [])
+    def _draw_summary(self, image: np.ndarray, observation: Observation) -> None:
+        """Draw summary at top."""
+        face_count = len(observation.faces)
+        h = observation.signals.get("expression_happy", 0)
+        a = observation.signals.get("expression_angry", 0)
+        n = observation.signals.get("expression_neutral", 1)
+        cv2.putText(image, f"Faces: {face_count} | H:{h:.2f} A:{a:.2f} N:{n:.2f}",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_WHITE_BGR, 1)
 
-        # Draw signals-based info
-        person_count = int(observation.signals.get("person_count", 0))
-        hands_raised = int(observation.signals.get("hands_raised_count", 0))
-        wave_detected = observation.signals.get("hand_wave_detected", 0) > 0.5
-        wave_conf = observation.signals.get("hand_wave_confidence", 0)
-
-        # Draw summary
-        status_color = cfg.hand_raised_color if hands_raised > 0 else cfg.pose_color
-        cv2.putText(
-            output,
-            f"Persons: {person_count} | Hands Up: {hands_raised}",
-            (10, 25),
-            cfg.font,
-            cfg.font_scale,
-            status_color,
-            1,
-        )
-
-        if wave_detected:
-            cv2.putText(
-                output,
-                f"WAVE DETECTED ({wave_conf:.2f})",
-                (10, 50),
-                cfg.font,
-                cfg.font_scale * 1.2,
-                (0, 0, 255),
-                2,
-            )
-
-        # Draw per-person hand status
-        y_offset = 75
-        for i in range(person_count):
-            left_raised = observation.signals.get(f"person_{i}_left_raised", 0) > 0
-            right_raised = observation.signals.get(f"person_{i}_right_raised", 0) > 0
-
-            status = ""
-            if left_raised and right_raised:
-                status = "Both hands up"
-            elif left_raised:
-                status = "Left hand up"
-            elif right_raised:
-                status = "Right hand up"
-
-            if status:
-                cv2.putText(
-                    output,
-                    f"Person {i}: {status}",
-                    (10, y_offset),
-                    cfg.font,
-                    cfg.font_scale * 0.8,
-                    cfg.hand_raised_color,
-                    1,
-                )
-                y_offset += 20
-
-        return output
-
-    def draw_quality_observation(
+    def draw_face_classifier_observation(
         self,
         image: np.ndarray,
-        observation: Observation,
+        classifier_obs: Observation,
+        face_obs: Optional[Observation] = None,
     ) -> np.ndarray:
-        """Draw quality metrics overlay.
+        """Draw face classification results with role-specific colors.
 
         Args:
-            image: Input BGR image.
-            observation: Observation from QualityExtractor.
+            image: Input image.
+            classifier_obs: Observation from FaceClassifierExtractor.
+            face_obs: Optional face observation for bbox data.
 
-        Returns:
-            Annotated image with quality overlay.
+        Supports FaceClassifierOutput structure from face_classifier.py:
+        - faces: List[ClassifiedFace] with .face, .role, .confidence, .track_length
+        - main_face: Optional[ClassifiedFace]
+        - passenger_faces: List[ClassifiedFace]
+        - transient_count, noise_count: int
         """
         output = image.copy()
         h, w = output.shape[:2]
-        cfg = self.config
 
-        # Get metrics
-        blur_score = observation.signals.get("blur_score", 0)
-        blur_quality = observation.signals.get("blur_quality", 0)
-        brightness = observation.signals.get("brightness", 0)
-        brightness_quality = observation.signals.get("brightness_quality", 0)
-        contrast = observation.signals.get("contrast", 0)
-        contrast_quality = observation.signals.get("contrast_quality", 0)
-        quality_gate = observation.signals.get("quality_gate", 0)
+        if classifier_obs.data is None:
+            return output
 
-        # Draw quality bars on the right side
-        bar_x = w - 150
-        bar_w = 100
-        bar_h = 15
-        y_start = 30
+        data = classifier_obs.data
 
-        metrics = [
-            ("Blur", blur_quality, f"{blur_score:.0f}"),
-            ("Bright", brightness_quality, f"{brightness:.0f}"),
-            ("Contrast", contrast_quality, f"{contrast:.0f}"),
+        # Check for faces attribute (from FaceClassifierOutput)
+        if not hasattr(data, 'faces') or not data.faces:
+            return output
+
+        # Role to color mapping
+        role_colors = {
+            "main": COLOR_MAIN_BGR,
+            "passenger": COLOR_PASSENGER_BGR,
+            "transient": COLOR_TRANSIENT_BGR,
+            "noise": COLOR_NOISE_BGR,
+        }
+
+        # Draw each classified face
+        for cf in data.faces:
+            # ClassifiedFace has: face, role, confidence, track_length, avg_area
+            face = cf.face
+            role = cf.role
+            track_length = cf.track_length
+
+            # Get bbox in pixel coordinates
+            x1 = int(face.bbox[0] * w)
+            y1 = int(face.bbox[1] * h)
+            x2 = int((face.bbox[0] + face.bbox[2]) * w)
+            y2 = int((face.bbox[1] + face.bbox[3]) * h)
+
+            color = role_colors.get(role, COLOR_GRAY_BGR)
+
+            # Draw bbox with role color
+            thickness = 3 if role == "main" else 2
+            cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
+
+            # Draw role label with background
+            label = f"{role.upper()} ({track_length}f)"
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+            label_y = y1 - 5 if y1 > 25 else y2 + 15
+
+            # Background rectangle for label
+            cv2.rectangle(
+                output,
+                (x1, label_y - label_size[1] - 4),
+                (x1 + label_size[0] + 4, label_y + 2),
+                color,
+                -1,
+            )
+            cv2.putText(
+                output, label, (x1 + 2, label_y - 2),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_DARK_BGR, 1,
+            )
+
+            # Draw face_id small
+            cv2.putText(
+                output, f"ID:{face.face_id}", (x1 + 2, y2 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1,
+            )
+
+            # Draw emotion bars for main/passenger (not noise/transient)
+            if role in ("main", "passenger"):
+                self._draw_emotion_bars(output, face, x1, y2 + 5, x2 - x1)
+
+        # Draw summary
+        main_detected = 1 if hasattr(data, 'main_face') and data.main_face else 0
+        passenger_count = len(data.passenger_faces) if hasattr(data, 'passenger_faces') else 0
+        transient_count = data.transient_count if hasattr(data, 'transient_count') else 0
+        noise_count = data.noise_count if hasattr(data, 'noise_count') else 0
+        summary = f"Main: {main_detected} | Pass: {passenger_count} | Trans: {transient_count} | Noise: {noise_count}"
+        cv2.putText(output, summary, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_WHITE_BGR, 1)
+
+        return output
+
+    def draw_pose_observation(self, image: np.ndarray, observation: Observation) -> np.ndarray:
+        """Draw pose observations with upper body landmarks."""
+        output = image.copy()
+        h, w = output.shape[:2]
+        person_count = int(observation.signals.get("person_count", 0))
+        hands_raised = int(observation.signals.get("hands_raised_count", 0))
+        wave = observation.signals.get("hand_wave_detected", 0) > 0.5
+
+        # Draw keypoints if available
+        if observation.data is not None and hasattr(observation.data, 'keypoints'):
+            pose_data: PoseOutput = observation.data
+            for person in pose_data.keypoints:
+                self._draw_upper_body_skeleton(output, person, w, h)
+
+        # Draw summary text
+        color = COLOR_HAPPY_BGR if hands_raised > 0 else COLOR_GREEN_BGR
+        cv2.putText(output, f"Persons: {person_count} | Hands Up: {hands_raised}",
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        if wave:
+            cv2.putText(output, "WAVE DETECTED", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_RED_BGR, 2)
+        return output
+
+    def _draw_upper_body_skeleton(self, image: np.ndarray, person: Dict, w: int, h: int) -> None:
+        """Draw upper body skeleton for a person.
+
+        Draws: head, shoulders, elbows, wrists with connecting lines.
+        """
+        keypoints = person.get("keypoints", [])
+        if not keypoints or len(keypoints) < 11:  # Need at least up to wrists
+            return
+
+        # Upper body skeleton connections (indices)
+        # Head: nose, eyes, ears
+        # Body: shoulders, elbows, wrists
+        connections = [
+            # Face connections
+            (KeypointIndex.NOSE, KeypointIndex.LEFT_EYE),
+            (KeypointIndex.NOSE, KeypointIndex.RIGHT_EYE),
+            (KeypointIndex.LEFT_EYE, KeypointIndex.LEFT_EAR),
+            (KeypointIndex.RIGHT_EYE, KeypointIndex.RIGHT_EAR),
+            # Shoulder to shoulder
+            (KeypointIndex.LEFT_SHOULDER, KeypointIndex.RIGHT_SHOULDER),
+            # Left arm
+            (KeypointIndex.LEFT_SHOULDER, KeypointIndex.LEFT_ELBOW),
+            (KeypointIndex.LEFT_ELBOW, KeypointIndex.LEFT_WRIST),
+            # Right arm
+            (KeypointIndex.RIGHT_SHOULDER, KeypointIndex.RIGHT_ELBOW),
+            (KeypointIndex.RIGHT_ELBOW, KeypointIndex.RIGHT_WRIST),
+            # Nose to shoulder center (neck approximation)
         ]
 
-        for i, (name, quality, raw_val) in enumerate(metrics):
-            y = y_start + i * 30
+        min_conf = 0.3
 
-            # Label
-            cv2.putText(output, name, (bar_x - 60, y + 12), cfg.font, cfg.font_scale * 0.8, cfg.text_color, 1)
+        # Draw skeleton lines
+        for idx1, idx2 in connections:
+            if idx1 >= len(keypoints) or idx2 >= len(keypoints):
+                continue
+            kpt1, kpt2 = keypoints[idx1], keypoints[idx2]
+            if kpt1[2] < min_conf or kpt2[2] < min_conf:
+                continue
+            pt1 = (int(kpt1[0]), int(kpt1[1]))
+            pt2 = (int(kpt2[0]), int(kpt2[1]))
+            cv2.line(image, pt1, pt2, COLOR_SKELETON_BGR, 2)
 
-            # Background bar
-            cv2.rectangle(output, (bar_x, y), (bar_x + bar_w, y + bar_h), (50, 50, 50), -1)
+        # Draw keypoints (upper body only: 0-10)
+        upper_body_indices = [
+            KeypointIndex.NOSE,
+            KeypointIndex.LEFT_EYE, KeypointIndex.RIGHT_EYE,
+            KeypointIndex.LEFT_EAR, KeypointIndex.RIGHT_EAR,
+            KeypointIndex.LEFT_SHOULDER, KeypointIndex.RIGHT_SHOULDER,
+            KeypointIndex.LEFT_ELBOW, KeypointIndex.RIGHT_ELBOW,
+            KeypointIndex.LEFT_WRIST, KeypointIndex.RIGHT_WRIST,
+        ]
+        for idx in upper_body_indices:
+            if idx >= len(keypoints):
+                continue
+            kpt = keypoints[idx]
+            if kpt[2] < min_conf:
+                continue
+            pt = (int(kpt[0]), int(kpt[1]))
+            # Different colors for different parts
+            if idx == KeypointIndex.NOSE:
+                color = COLOR_WHITE_BGR
+                radius = 4
+            elif idx in (KeypointIndex.LEFT_WRIST, KeypointIndex.RIGHT_WRIST):
+                color = COLOR_HAPPY_BGR  # Yellow for wrists
+                radius = 6
+            elif idx in (KeypointIndex.LEFT_SHOULDER, KeypointIndex.RIGHT_SHOULDER):
+                color = COLOR_GREEN_BGR
+                radius = 5
+            else:
+                color = COLOR_KEYPOINT_BGR
+                radius = 3
+            cv2.circle(image, pt, radius, color, -1)
+            cv2.circle(image, pt, radius, COLOR_DARK_BGR, 1)
 
-            # Quality fill
-            fill_w = int(bar_w * min(1.0, quality))
-            color = cfg.quality_good_color if quality >= 1.0 else cfg.quality_bad_color
-            cv2.rectangle(output, (bar_x, y), (bar_x + fill_w, y + bar_h), color, -1)
+    def draw_quality_observation(self, image: np.ndarray, observation: Observation) -> np.ndarray:
+        """Draw quality metrics."""
+        output = image.copy()
+        h, w = output.shape[:2]
 
-            # Raw value
-            cv2.putText(output, raw_val, (bar_x + bar_w + 5, y + 12), cfg.font, cfg.font_scale * 0.7, cfg.text_color, 1)
+        blur = observation.signals.get("blur_quality", 0)
+        bright = observation.signals.get("brightness_quality", 0)
+        contrast = observation.signals.get("contrast_quality", 0)
+        gate = observation.signals.get("quality_gate", 0)
 
-        # Gate status
-        gate_y = y_start + len(metrics) * 30 + 10
-        gate_color = cfg.gate_open_color if quality_gate > 0.5 else cfg.gate_closed_color
-        gate_text = "GATE: OPEN" if quality_gate > 0.5 else "GATE: CLOSED"
-        cv2.putText(output, gate_text, (bar_x - 60, gate_y + 12), cfg.font, cfg.font_scale, gate_color, 2)
+        bar_x, bar_w, bar_h = w - 120, 80, 12
+        for i, (name, val) in enumerate([("Blur", blur), ("Bright", bright), ("Contrast", contrast)]):
+            y = 30 + i * 25
+            color = COLOR_GREEN_BGR if val >= 1.0 else COLOR_RED_BGR
+            cv2.putText(output, name, (bar_x - 55, y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, COLOR_WHITE_BGR, 1)
+            cv2.rectangle(output, (bar_x, y), (bar_x + bar_w, y + bar_h), COLOR_DARK_BGR, -1)
+            cv2.rectangle(output, (bar_x, y), (bar_x + int(bar_w * min(1.0, val)), y + bar_h), color, -1)
 
+        gate_y = 30 + 3 * 25 + 10
+        gate_color = COLOR_GREEN_BGR if gate > 0.5 else COLOR_GRAY_BGR
+        cv2.putText(output, "GATE: OPEN" if gate > 0.5 else "GATE: CLOSED",
+                    (bar_x - 55, gate_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, gate_color, 2)
         return output
 
 
 class FusionVisualizer:
-    """Visualizer for fusion state and decisions."""
+    """Visualizer for fusion state with adaptive happy tracking."""
+
+    THUMB_SIZE = 64
+    MAX_THUMBS = 5
 
     def __init__(self, config: Optional[VisualizationConfig] = None):
         self.config = config or VisualizationConfig()
-        self._expression_history: List[float] = []
+        # Raw happy history
+        self._happy_history: List[float] = []
+        # Baseline history (slow EWMA)
+        self._baseline_history: List[float] = []
+        # Spike history (recent - baseline)
+        self._spike_history: List[float] = []
+        # Other
         self._gate_history: List[bool] = []
         self._trigger_times: List[int] = []
-        self._max_history = 300  # ~10 seconds at 30fps
+        self._trigger_thumbs: List[Tuple[int, np.ndarray, str]] = []
+        self._max_history = 300
 
     def reset(self) -> None:
         """Reset history."""
-        self._expression_history.clear()
+        self._happy_history.clear()
+        self._baseline_history.clear()
+        self._spike_history.clear()
         self._gate_history.clear()
         self._trigger_times.clear()
+        self._trigger_thumbs.clear()
 
     def draw_fusion_state(
         self,
@@ -324,383 +387,255 @@ class FusionVisualizer:
         result: FusionResult,
         is_gate_open: bool,
         in_cooldown: bool,
+        source_image: Optional[np.ndarray] = None,
+        adaptive_summary: Optional[Dict] = None,
     ) -> np.ndarray:
-        """Draw fusion state overlay.
+        """Draw fusion state overlay with adaptive happy tracking.
 
         Args:
-            image: Input BGR image.
+            image: Input image.
             observation: Current observation.
             result: Fusion result.
-            is_gate_open: Whether gate is open.
-            in_cooldown: Whether in cooldown.
-
-        Returns:
-            Annotated image.
+            is_gate_open: Gate state.
+            in_cooldown: Cooldown state.
+            source_image: Original image for thumbnail capture.
+            adaptive_summary: Adaptive happy tracking summary from fusion.
         """
         output = image.copy()
         h, w = output.shape[:2]
-        cfg = self.config
 
-        # Update history
-        max_expr = observation.signals.get("max_expression", 0)
-        self._expression_history.append(max_expr)
+        # Update raw happy history
+        happy = observation.signals.get("expression_happy", 0)
+        self._happy_history.append(happy)
         self._gate_history.append(is_gate_open)
-        if len(self._expression_history) > self._max_history:
-            self._expression_history.pop(0)
+
+        # Update adaptive tracking history
+        if adaptive_summary and adaptive_summary.get("states"):
+            first_state = next(iter(adaptive_summary["states"].values()), None)
+            if first_state:
+                self._baseline_history.append(first_state["baseline"])
+                self._spike_history.append(first_state["spike"])
+            else:
+                self._baseline_history.append(happy)
+                self._spike_history.append(0)
+        else:
+            self._baseline_history.append(happy)
+            self._spike_history.append(0)
+
+        # Trim history
+        if len(self._happy_history) > self._max_history:
+            self._happy_history.pop(0)
+            self._baseline_history.pop(0)
+            self._spike_history.pop(0)
             self._gate_history.pop(0)
+            self._trigger_times = [t - 1 for t in self._trigger_times if t > 1]
+            self._trigger_thumbs = [(t - 1, th, r) for t, th, r in self._trigger_thumbs if t > 1]
 
         if result.should_trigger:
-            self._trigger_times.append(len(self._expression_history))
+            time_idx = len(self._happy_history)
+            self._trigger_times.append(time_idx)
+            thumb = self._capture_thumbnail(source_image if source_image is not None else image, observation)
+            if thumb is not None:
+                self._trigger_thumbs.append((time_idx, thumb, result.reason))
+                if len(self._trigger_thumbs) > self.MAX_THUMBS:
+                    self._trigger_thumbs.pop(0)
 
-        # Draw status panel at top
-        panel_h = 80
-        cv2.rectangle(output, (0, 0), (w, panel_h), (30, 30, 30), -1)
+        # Top panel
+        panel_height = 70
+        cv2.rectangle(output, (0, 0), (w, panel_height), COLOR_DARK_BGR, -1)
 
-        # Gate status
-        gate_color = cfg.gate_open_color if is_gate_open else cfg.gate_closed_color
-        gate_text = "GATE: OPEN" if is_gate_open else "GATE: CLOSED"
-        cv2.putText(output, gate_text, (10, 25), cfg.font, cfg.font_scale, gate_color, 2)
-
-        # Cooldown status
+        # Gate and cooldown status
+        gate_color = COLOR_GREEN_BGR if is_gate_open else COLOR_GRAY_BGR
+        cv2.putText(output, "GATE: OPEN" if is_gate_open else "GATE: CLOSED",
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, gate_color, 1)
         if in_cooldown:
-            cv2.putText(output, "COOLDOWN", (150, 25), cfg.font, cfg.font_scale, (0, 165, 255), 2)
+            cv2.putText(output, "COOLDOWN", (130, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)
 
-        # Current expression
-        cv2.putText(output, f"Expression: {max_expr:.2f}", (10, 50), cfg.font, cfg.font_scale, cfg.text_color, 1)
+        # Adaptive tracking info
+        if adaptive_summary:
+            max_spike = adaptive_summary.get("max_spike", 0)
+            threshold = adaptive_summary.get("threshold", 0.12)
 
-        # Metadata from result
-        state = result.metadata.get("state", "monitoring")
-        consecutive = result.metadata.get("consecutive_high", 0)
-        cv2.putText(output, f"State: {state} | Consecutive: {consecutive}", (10, 70), cfg.font, cfg.font_scale * 0.8, cfg.text_color, 1)
+            first_state = next(iter(adaptive_summary.get("states", {}).values()), None)
+            if first_state:
+                baseline = first_state["baseline"]
+                recent = first_state["recent"] if "recent" in first_state else happy
+                spike = first_state["spike"]
+
+                # Show: Happy (current) | Baseline | Spike
+                cv2.putText(output, f"Happy: {happy:.2f}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_HAPPY_BGR, 1)
+                cv2.putText(output, f"Base: {baseline:.2f}", (130, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_GRAY_BGR, 1)
+
+                # Spike with color coding
+                spike_color = COLOR_RED_BGR if spike > threshold else (COLOR_HAPPY_BGR if spike > threshold * 0.5 else COLOR_GRAY_BGR)
+                cv2.putText(output, f"Spike: {spike:+.2f}", (240, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, spike_color, 1)
+
+            # Spike bar (right side)
+            spike_pct = min(1.0, max(0, max_spike) / (threshold * 2))
+            bar_x, bar_w, bar_h = w - 150, 100, 20
+            cv2.rectangle(output, (bar_x, 25), (bar_x + bar_w, 25 + bar_h), (60, 60, 60), -1)
+            bar_color = COLOR_RED_BGR if max_spike > threshold else COLOR_GREEN_BGR
+            cv2.rectangle(output, (bar_x, 25), (bar_x + int(bar_w * spike_pct), 25 + bar_h), bar_color, -1)
+            # Threshold marker at 50%
+            th_x = bar_x + bar_w // 2
+            cv2.line(output, (th_x, 23), (th_x, 25 + bar_h + 2), COLOR_WHITE_BGR, 2)
+            cv2.putText(output, f"{max_spike:.2f}", (bar_x + bar_w + 5, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_WHITE_BGR, 1)
+        else:
+            cv2.putText(output, f"Happy: {happy:.2f}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_HAPPY_BGR, 1)
 
         # Trigger flash
         if result.should_trigger:
-            # Flash border
-            cv2.rectangle(output, (0, 0), (w - 1, h - 1), cfg.trigger_color, 10)
-            cv2.putText(
-                output,
-                f"TRIGGER: {result.reason}",
-                (w // 2 - 100, h // 2),
-                cfg.font,
-                1.0,
-                cfg.trigger_color,
-                3,
-            )
+            cv2.rectangle(output, (0, 0), (w - 1, h - 1), COLOR_RED_BGR, 10)
+            cv2.putText(output, f"TRIGGER: {result.reason}", (w // 2 - 100, h // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLOR_RED_BGR, 3)
 
-        # Draw expression graph at bottom
-        graph_h = cfg.graph_height
-        graph_y = h - graph_h - 10
-        self._draw_expression_graph(output, 10, graph_y, w - 20, graph_h)
+        # Draw graph
+        spike_threshold = adaptive_summary.get("threshold", 0.12) if adaptive_summary else 0.12
+        self._draw_adaptive_graph(output, 10, h - self.config.graph_height - 10, w - 20,
+                                   self.config.graph_height, spike_threshold)
+        self._draw_thumbnails(output)
 
         return output
 
-    def _draw_expression_graph(
-        self,
-        image: np.ndarray,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-    ) -> None:
-        """Draw expression history graph."""
-        cfg = self.config
+    def _draw_graph(self, image: np.ndarray, x: int, y: int, width: int, height: int) -> None:
+        """Draw raw emotion history graph (legacy)."""
+        cv2.rectangle(image, (x, y), (x + width, y + height), COLOR_DARK_BGR, -1)
 
-        # Background
-        cv2.rectangle(image, (x, y), (x + width, y + height), (40, 40, 40), -1)
-
-        if len(self._expression_history) < 2:
+        if len(self._happy_history) < 2:
             return
 
-        # Draw gate status as background color bands
-        for i, gate_open in enumerate(self._gate_history):
+        # Gate background
+        for i, gate in enumerate(self._gate_history):
             px = x + int(i * width / self._max_history)
-            color = (40, 60, 40) if gate_open else (60, 40, 40)
-            cv2.line(image, (px, y), (px, y + height), color, 1)
+            cv2.line(image, (px, y), (px, y + height), (40, 60, 40) if gate else (60, 40, 40), 1)
 
-        # Draw threshold line
-        threshold_y = y + int(height * (1 - 0.7))  # Assuming 0.7 threshold
-        cv2.line(image, (x, threshold_y), (x + width, threshold_y), (100, 100, 100), 1)
+        # Threshold line
+        cv2.line(image, (x, y + int(height * 0.3)), (x + width, y + int(height * 0.3)), (100, 100, 100), 1)
 
-        # Draw expression line
-        points = []
-        for i, expr in enumerate(self._expression_history):
-            px = x + int(i * width / self._max_history)
-            py = y + int(height * (1 - expr))
-            points.append((px, py))
+        # Emotion lines
+        for history, color in [(self._happy_history, COLOR_HAPPY_BGR),
+                               (self._angry_history, COLOR_ANGRY_BGR),
+                               (self._neutral_history, COLOR_NEUTRAL_BGR)]:
+            pts = [(x + int(i * width / self._max_history), y + int(height * (1 - v)))
+                   for i, v in enumerate(history)]
+            for i in range(1, len(pts)):
+                cv2.line(image, pts[i - 1], pts[i], color, 1)
 
-        for i in range(1, len(points)):
-            cv2.line(image, points[i - 1], points[i], (0, 255, 255), 1)
-
-        # Draw trigger markers
+        # Trigger markers
         for t in self._trigger_times:
-            if t < len(self._expression_history):
+            if t < len(self._happy_history):
                 px = x + int(t * width / self._max_history)
-                cv2.line(image, (px, y), (px, y + height), cfg.trigger_color, 2)
+                cv2.line(image, (px, y), (px, y + height), COLOR_RED_BGR, 2)
 
-        # Labels
-        cv2.putText(image, "1.0", (x - 25, y + 10), cfg.font, cfg.font_scale * 0.6, cfg.text_color, 1)
-        cv2.putText(image, "0.0", (x - 25, y + height), cfg.font, cfg.font_scale * 0.6, cfg.text_color, 1)
+        # Legend
+        cv2.putText(image, "H", (x + width + 5, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_HAPPY_BGR, 1)
+        cv2.putText(image, "A", (x + width + 5, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_ANGRY_BGR, 1)
+        cv2.putText(image, "N", (x + width + 5, y + 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_NEUTRAL_BGR, 1)
 
+    def _draw_adaptive_graph(self, image: np.ndarray, x: int, y: int, width: int, height: int,
+                              threshold: float = 0.12) -> None:
+        """Draw adaptive happy tracking graph.
 
-class TraceVisualizer:
-    """Visualizer for observability trace data.
-
-    Renders timing panels, component performance graphs, and
-    diagnostic information at VERBOSE trace level.
-    """
-
-    def __init__(
-        self,
-        config: Optional[VisualizationConfig] = None,
-        history_size: int = 100,
-    ):
-        self.config = config or VisualizationConfig()
-        self._history_size = history_size
-
-        # Timing history per component
-        self._timing_history: Dict[str, deque] = {}
-        self._frame_count = 0
-        self._start_time = time.monotonic()
-        self._fps_history: deque = deque(maxlen=30)
-        self._last_frame_time = time.monotonic()
-
-        # Stats
-        self._dropped_count = 0
-        self._slow_count = 0
-
-    def reset(self) -> None:
-        """Reset all state."""
-        self._timing_history.clear()
-        self._frame_count = 0
-        self._start_time = time.monotonic()
-        self._fps_history.clear()
-        self._last_frame_time = time.monotonic()
-        self._dropped_count = 0
-        self._slow_count = 0
-
-    def record_timing(self, component: str, processing_ms: float, is_slow: bool = False) -> None:
-        """Record component timing data.
-
-        Args:
-            component: Component name (e.g., "face", "pose", "gesture").
-            processing_ms: Processing time in milliseconds.
-            is_slow: Whether this was a slow frame.
+        Shows:
+        - Yellow line: Raw happy value (0-1)
+        - Gray dashed: Baseline (person's typical level)
+        - Green/Red area: Spike (recent - baseline)
         """
-        if component not in self._timing_history:
-            self._timing_history[component] = deque(maxlen=self._history_size)
-        self._timing_history[component].append(processing_ms)
-        if is_slow:
-            self._slow_count += 1
+        cv2.rectangle(image, (x, y), (x + width, y + height), COLOR_DARK_BGR, -1)
 
-    def record_frame(self) -> None:
-        """Record a frame for FPS calculation."""
-        self._frame_count += 1
-        now = time.monotonic()
-        dt = now - self._last_frame_time
-        if dt > 0:
-            self._fps_history.append(1.0 / dt)
-        self._last_frame_time = now
+        if len(self._happy_history) < 2:
+            return
 
-    def record_drop(self, count: int = 1) -> None:
-        """Record dropped frames."""
-        self._dropped_count += count
+        # Gate background
+        for i, gate in enumerate(self._gate_history):
+            px = x + int(i * width / self._max_history)
+            cv2.line(image, (px, y), (px, y + height), (40, 60, 40) if gate else (60, 40, 40), 1)
 
-    def draw_timing_panel(
-        self,
-        image: np.ndarray,
-        x: int = 10,
-        y: int = 10,
-        width: int = 280,
-        target_fps: float = 10.0,
-    ) -> np.ndarray:
-        """Draw timing panel overlay on image.
+        # Threshold line (from bottom, at threshold height)
+        th_y = y + height - int(threshold * height * 2)  # Scale threshold
+        cv2.line(image, (x, th_y), (x + width, th_y), (100, 100, 100), 1)
 
-        Args:
-            image: Input image.
-            x: Panel x position.
-            y: Panel y position.
-            width: Panel width.
-            target_fps: Target FPS for comparison.
+        # Draw baseline (gray, dashed effect with dots)
+        if self._baseline_history:
+            for i in range(0, len(self._baseline_history), 3):
+                px = x + int(i * width / self._max_history)
+                py = y + height - int(self._baseline_history[i] * height)
+                cv2.circle(image, (px, py), 1, COLOR_GRAY_BGR, -1)
 
-        Returns:
-            Image with timing panel overlay.
-        """
-        cfg = self.config
-        output = image.copy()
+        # Draw raw happy line (yellow)
+        pts_happy = [(x + int(i * width / self._max_history), y + height - int(v * height))
+                     for i, v in enumerate(self._happy_history)]
+        for i in range(1, len(pts_happy)):
+            cv2.line(image, pts_happy[i - 1], pts_happy[i], COLOR_HAPPY_BGR, 1)
 
-        # Calculate stats
-        actual_fps = sum(self._fps_history) / len(self._fps_history) if self._fps_history else 0
-        elapsed = time.monotonic() - self._start_time
-        avg_latency = 0
+        # Draw spike area (filled between baseline and current)
+        if self._spike_history and self._baseline_history:
+            for i in range(len(self._spike_history)):
+                if i >= len(self._baseline_history):
+                    break
+                px = x + int(i * width / self._max_history)
+                base_y = y + height - int(self._baseline_history[i] * height)
+                spike = self._spike_history[i]
+                if spike > 0:
+                    # Positive spike - green to red based on threshold
+                    spike_h = int(spike * height)
+                    color = COLOR_RED_BGR if spike > threshold else (0, 180, 0)
+                    cv2.line(image, (px, base_y), (px, base_y - spike_h), color, 1)
 
-        # Panel background
-        panel_height = 30 + 25 * (len(self._timing_history) + 1)
-        cv2.rectangle(
-            output,
-            (x, y),
-            (x + width, y + panel_height),
-            (40, 40, 40),
-            -1,
-        )
-        cv2.rectangle(
-            output,
-            (x, y),
-            (x + width, y + panel_height),
-            (100, 100, 100),
-            1,
-        )
+        # Trigger markers
+        for t in self._trigger_times:
+            if t < len(self._happy_history):
+                px = x + int(t * width / self._max_history)
+                cv2.line(image, (px, y), (px, y + height), COLOR_RED_BGR, 2)
 
-        # Title
-        cv2.putText(
-            output,
-            "Timing Panel (VERBOSE)",
-            (x + 5, y + 15),
-            cfg.font,
-            cfg.font_scale * 0.7,
-            (200, 200, 200),
-            1,
-        )
+        # Legend
+        cv2.putText(image, "Happy", (x + 5, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_HAPPY_BGR, 1)
+        cv2.putText(image, "base", (x + 45, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_GRAY_BGR, 1)
+        cv2.putText(image, f"th={threshold:.2f}", (x + width - 50, y + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.25, COLOR_GRAY_BGR, 1)
 
-        # FPS line
-        fps_color = (0, 255, 0) if actual_fps >= target_fps * 0.9 else (0, 255, 255) if actual_fps >= target_fps * 0.7 else (0, 0, 255)
-        cv2.putText(
-            output,
-            f"FPS: {actual_fps:.1f}/{target_fps:.0f}",
-            (x + 5, y + 35),
-            cfg.font,
-            cfg.font_scale * 0.6,
-            fps_color,
-            1,
-        )
+    def _capture_thumbnail(self, image: np.ndarray, observation: Observation) -> Optional[np.ndarray]:
+        """Capture largest face as thumbnail."""
+        if not observation.faces:
+            return None
 
-        # Dropped frames
-        drop_text = f"Dropped: {self._dropped_count}"
-        if self._dropped_count > 0:
-            drop_color = (0, 0, 255)  # Red
-        else:
-            drop_color = (0, 255, 0)  # Green
-        cv2.putText(
-            output,
-            drop_text,
-            (x + 120, y + 35),
-            cfg.font,
-            cfg.font_scale * 0.6,
-            drop_color,
-            1,
-        )
+        h, w = image.shape[:2]
+        best = max(observation.faces, key=lambda f: f.bbox[2] * f.bbox[3])
 
-        # Component timing bars
-        row_y = y + 50
-        bar_max_width = width - 100
+        bx, by, bw, bh = best.bbox
+        x1 = int(max(0, (bx - bw * 0.2) * w))
+        y1 = int(max(0, (by - bh * 0.2) * h))
+        x2 = int(min(w, (bx + bw * 1.2) * w))
+        y2 = int(min(h, (by + bh * 1.2) * h))
 
-        for component, history in self._timing_history.items():
-            if not history:
-                continue
+        if x2 <= x1 or y2 <= y1:
+            return None
 
-            avg_ms = sum(history) / len(history)
-            max_ms = max(history)
+        crop = image[y1:y2, x1:x2]
+        return cv2.resize(crop, (self.THUMB_SIZE, self.THUMB_SIZE)) if crop.size > 0 else None
 
-            # Bar width based on time (scale: 0-100ms)
-            bar_width = min(int(avg_ms * bar_max_width / 100), bar_max_width)
-            bar_color = (0, 255, 0) if avg_ms < 50 else (0, 255, 255) if avg_ms < 80 else (0, 0, 255)
+    def _draw_thumbnails(self, image: np.ndarray) -> None:
+        """Draw trigger thumbnails on right side."""
+        if not self._trigger_thumbs:
+            return
 
-            # Component label
-            cv2.putText(
-                output,
-                f"{component[:8]:>8}:",
-                (x + 5, row_y + 5),
-                cfg.font,
-                cfg.font_scale * 0.5,
-                cfg.text_color,
-                1,
-            )
+        h, w = image.shape[:2]
+        thumb_x = w - self.THUMB_SIZE - 10
 
-            # Bar
-            cv2.rectangle(
-                output,
-                (x + 70, row_y - 8),
-                (x + 70 + bar_width, row_y + 4),
-                bar_color,
-                -1,
-            )
+        for i, (_, thumb, reason) in enumerate(self._trigger_thumbs):
+            y_pos = 90 + i * (self.THUMB_SIZE + 25)
+            if y_pos + self.THUMB_SIZE > h - self.config.graph_height - 20:
+                break
 
-            # Value
-            cv2.putText(
-                output,
-                f"{avg_ms:.0f}ms",
-                (x + 75 + bar_max_width, row_y + 5),
-                cfg.font,
-                cfg.font_scale * 0.5,
-                cfg.text_color,
-                1,
-            )
-
-            row_y += 20
-
-        return output
-
-    def draw_gate_checklist(
-        self,
-        image: np.ndarray,
-        conditions: Dict[str, bool],
-        x: int = 10,
-        y: int = 200,
-    ) -> np.ndarray:
-        """Draw gate condition checklist.
-
-        Args:
-            image: Input image.
-            conditions: Dict of condition name -> pass/fail.
-            x: Panel x position.
-            y: Panel y position.
-
-        Returns:
-            Image with gate checklist overlay.
-        """
-        cfg = self.config
-        output = image.copy()
-
-        # Panel background
-        panel_height = 20 + 15 * len(conditions)
-        cv2.rectangle(
-            output,
-            (x, y),
-            (x + 180, y + panel_height),
-            (40, 40, 40),
-            -1,
-        )
-
-        # Title
-        cv2.putText(
-            output,
-            "Gate Conditions:",
-            (x + 5, y + 15),
-            cfg.font,
-            cfg.font_scale * 0.6,
-            cfg.text_color,
-            1,
-        )
-
-        row_y = y + 30
-        for name, passed in conditions.items():
-            mark = "v" if passed else "x"
-            color = (0, 255, 0) if passed else (0, 0, 255)
-            cv2.putText(
-                output,
-                f"[{mark}] {name}",
-                (x + 5, row_y),
-                cfg.font,
-                cfg.font_scale * 0.5,
-                color,
-                1,
-            )
-            row_y += 15
-
-        return output
+            cv2.rectangle(image, (thumb_x - 2, y_pos - 2),
+                          (thumb_x + self.THUMB_SIZE + 2, y_pos + self.THUMB_SIZE + 2), COLOR_RED_BGR, 2)
+            image[y_pos:y_pos + self.THUMB_SIZE, thumb_x:thumb_x + self.THUMB_SIZE] = thumb
+            cv2.putText(image, reason[:12], (thumb_x, y_pos + self.THUMB_SIZE + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, COLOR_WHITE_BGR, 1)
 
 
 class DebugVisualizer:
-    """Combined visualizer for full pipeline debugging."""
+    """Combined visualizer for pipeline debugging."""
 
     def __init__(self, config: Optional[VisualizationConfig] = None):
         self.config = config or VisualizationConfig()
@@ -708,7 +643,6 @@ class DebugVisualizer:
         self.fusion_viz = FusionVisualizer(config)
 
     def reset(self) -> None:
-        """Reset all state."""
         self.fusion_viz.reset()
 
     def create_debug_view(
@@ -717,336 +651,92 @@ class DebugVisualizer:
         face_obs: Optional[Observation] = None,
         pose_obs: Optional[Observation] = None,
         quality_obs: Optional[Observation] = None,
+        classifier_obs: Optional[Observation] = None,
         fusion_result: Optional[FusionResult] = None,
         is_gate_open: bool = False,
         in_cooldown: bool = False,
         timing: Optional[Dict[str, float]] = None,
+        roi: Optional[Tuple[float, float, float, float]] = None,
     ) -> np.ndarray:
         """Create combined debug visualization.
 
         Args:
             frame: Input frame.
-            face_obs: Face extractor observation.
-            pose_obs: Pose extractor observation.
-            quality_obs: Quality extractor observation.
+            face_obs: Face observation.
+            pose_obs: Pose observation.
+            quality_obs: Quality observation.
+            classifier_obs: Face classifier observation (role classification).
             fusion_result: Fusion result.
-            is_gate_open: Gate state.
-            in_cooldown: Cooldown state.
-            timing: Optional timing dict for profile mode.
-
-        Returns:
-            Debug visualization image.
+            is_gate_open: Whether gate is open.
+            in_cooldown: Whether in cooldown.
+            timing: Timing info for profile mode.
+            roi: ROI boundary (x1, y1, x2, y2) in normalized coords [0-1].
         """
         image = frame.data.copy()
         h, w = image.shape[:2]
 
-        # Draw face observations
-        if face_obs is not None:
-            image = self.extractor_viz.draw_face_observation(image, face_obs, show_details=True)
+        # Draw ROI boundary first (under annotations)
+        if roi is not None:
+            self._draw_roi(image, roi)
 
-        # Draw pose observations
+        # Draw pose first (skeleton under other annotations)
         if pose_obs is not None:
             image = self.extractor_viz.draw_pose_observation(image, pose_obs)
 
-        # Draw quality overlay
+        # Draw face classifier if available (role-based colors)
+        if classifier_obs is not None:
+            image = self.extractor_viz.draw_face_classifier_observation(image, classifier_obs, face_obs)
+        elif face_obs is not None:
+            # Fallback to basic face observation
+            image = self.extractor_viz.draw_face_observation(image, face_obs)
+
         if quality_obs is not None:
             image = self.extractor_viz.draw_quality_observation(image, quality_obs)
-
-        # Draw fusion state if we have both observation and result
         if fusion_result is not None and face_obs is not None:
-            image = self.fusion_viz.draw_fusion_state(
-                image, face_obs, fusion_result, is_gate_open, in_cooldown
-            )
-
-        # Draw timing overlay in profile mode
+            image = self.fusion_viz.draw_fusion_state(image, face_obs, fusion_result,
+                                                       is_gate_open, in_cooldown, source_image=frame.data,
+                                                       adaptive_summary=fusion_result.metadata.get("adaptive_summary"))
         if timing is not None:
-            image = self.draw_timing_overlay(image, timing)
+            image = self._draw_timing(image, timing)
 
-        # Frame info
-        cv2.putText(
-            image,
-            f"Frame: {frame.frame_id} | t: {frame.t_src_ns / 1e9:.3f}s",
-            (10, h - 10),
-            self.config.font,
-            self.config.font_scale * 0.8,
-            self.config.text_color,
-            1,
-        )
-
+        cv2.putText(image, f"Frame: {frame.frame_id} | t: {frame.t_src_ns / 1e9:.3f}s",
+                    (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_WHITE_BGR, 1)
         return image
 
-    def draw_timing_overlay(
-        self,
-        image: np.ndarray,
-        timing: Dict[str, float],
-    ) -> np.ndarray:
-        """Draw timing overlay for profile mode.
+    def _draw_roi(self, image: np.ndarray, roi: Tuple[float, float, float, float]) -> None:
+        """Draw subtle ROI boundary."""
+        h, w = image.shape[:2]
+        x1, y1, x2, y2 = roi
+        px1, py1 = int(x1 * w), int(y1 * h)
+        px2, py2 = int(x2 * w), int(y2 * h)
 
-        Args:
-            image: Input BGR image.
-            timing: Dict with timing values (detect_ms, expression_ms, total_ms).
+        # Subtle gray color for ROI boundary
+        roi_color = (80, 80, 80)
 
-        Returns:
-            Image with timing overlay.
-        """
+        # Thin solid rectangle
+        cv2.rectangle(image, (px1, py1), (px2, py2), roi_color, 1)
+
+    def _draw_timing(self, image: np.ndarray, timing: Dict[str, float]) -> np.ndarray:
+        """Draw timing overlay."""
         output = image.copy()
         h, w = output.shape[:2]
-        cfg = self.config
 
-        # Panel position (right side, below quality metrics)
-        panel_w = 180
-        panel_h = 70
-        panel_x = w - panel_w - 10
-        panel_y = 140  # Below quality overlay area
-
-        # Semi-transparent background
+        panel_x, panel_y = w - 190, 140
         overlay = output.copy()
-        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (30, 30, 30), -1)
+        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + 180, panel_y + 70), COLOR_DARK_BGR, -1)
         cv2.addWeighted(overlay, 0.7, output, 0.3, 0, output)
 
-        # Border
-        cv2.rectangle(output, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (100, 100, 100), 1)
-
-        # Title
-        cv2.putText(
-            output,
-            "Profile",
-            (panel_x + 5, panel_y + 15),
-            cfg.font,
-            cfg.font_scale * 0.7,
-            (200, 200, 200),
-            1,
-        )
-
-        # Timing values
         detect_ms = timing.get('detect_ms', 0)
         expr_ms = timing.get('expression_ms', 0)
         total_ms = timing.get('total_ms', 0)
-
-        # Calculate FPS from total
         fps = 1000.0 / total_ms if total_ms > 0 else 0
 
-        # Color code based on performance
-        def get_color(ms: float, threshold: float = 50.0) -> Tuple[int, int, int]:
-            if ms < threshold * 0.6:
-                return (0, 255, 0)  # Green - fast
-            elif ms < threshold:
-                return (0, 255, 255)  # Yellow - acceptable
-            else:
-                return (0, 0, 255)  # Red - slow
+        def color(ms, th=50):
+            return COLOR_GREEN_BGR if ms < th * 0.6 else COLOR_HAPPY_BGR if ms < th else COLOR_RED_BGR
 
-        y_offset = panel_y + 30
-        line_height = 14
-
-        cv2.putText(output, f"Detect:  {detect_ms:6.1f}ms", (panel_x + 5, y_offset), cfg.font, cfg.font_scale * 0.6, get_color(detect_ms, 50), 1)
-        y_offset += line_height
-        cv2.putText(output, f"Express: {expr_ms:6.1f}ms", (panel_x + 5, y_offset), cfg.font, cfg.font_scale * 0.6, get_color(expr_ms, 50), 1)
-        y_offset += line_height
-        cv2.putText(output, f"Total:   {total_ms:6.1f}ms ({fps:.1f} FPS)", (panel_x + 5, y_offset), cfg.font, cfg.font_scale * 0.6, get_color(total_ms, 100), 1)
+        y = panel_y + 20
+        cv2.putText(output, f"Detect:  {detect_ms:5.1f}ms", (panel_x + 5, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color(detect_ms), 1)
+        cv2.putText(output, f"Express: {expr_ms:5.1f}ms", (panel_x + 5, y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color(expr_ms), 1)
+        cv2.putText(output, f"Total:   {total_ms:5.1f}ms ({fps:.1f}fps)", (panel_x + 5, y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, color(total_ms, 100), 1)
 
         return output
-
-
-def run_debug_session(
-    video_path: str,
-    output_path: Optional[str] = None,
-    fps: float = 10.0,
-    use_ml_backends: Optional[bool] = None,
-    show_window: bool = True,
-) -> None:
-    """Run interactive debug session on a video.
-
-    Args:
-        video_path: Path to input video.
-        output_path: Optional path to save debug video.
-        fps: Processing FPS.
-        use_ml_backends: Whether to use real ML backends.
-            None (default): Auto-detect, use ML if available.
-            True: Force ML backends, error if not available.
-            False: Force dummy backends.
-        show_window: Whether to show interactive window.
-    """
-    from facemoment.moment_detector.extractors import (
-        DummyExtractor,
-        QualityExtractor,
-    )
-    from facemoment.moment_detector.fusion import DummyFusion, HighlightFusion
-
-    # Set up extractors - auto-detect ML backends if not explicitly disabled
-    extractors = []
-    face_available = False
-    pose_available = False
-
-    if use_ml_backends or use_ml_backends is None:
-        # Try to load and initialize FaceExtractor
-        try:
-            from facemoment.moment_detector.extractors import FaceExtractor
-            face_ext = FaceExtractor()
-            face_ext.initialize()  # Initialize now to catch errors early
-            extractors.append(face_ext)
-            face_available = True
-            logger.info("FaceExtractor loaded and initialized")
-        except Exception as e:
-            if use_ml_backends:
-                raise RuntimeError(f"FaceExtractor failed: {e}\nInstall with: uv sync --extra ml")
-            logger.warning(f"FaceExtractor not available: {e}")
-
-        # Try to load and initialize PoseExtractor
-        try:
-            from facemoment.moment_detector.extractors import PoseExtractor
-            pose_ext = PoseExtractor()
-            pose_ext.initialize()  # Initialize now to catch errors early
-            extractors.append(pose_ext)
-            pose_available = True
-            logger.info("PoseExtractor loaded and initialized")
-        except Exception as e:
-            if use_ml_backends:
-                raise RuntimeError(f"PoseExtractor failed: {e}\nInstall with: uv sync --extra ml")
-            logger.warning(f"PoseExtractor not available: {e}")
-
-    # Add QualityExtractor (always works, no ML deps)
-    extractors.append(QualityExtractor())
-
-    # Fall back to dummy if no ML extractors loaded
-    if not face_available and not pose_available:
-        extractors.insert(0, DummyExtractor(num_faces=1, spike_probability=0.1, seed=42))
-        logger.info("Using DummyExtractor (no ML backends available)")
-
-    # Choose fusion based on available extractors
-    if face_available:
-        fusion = HighlightFusion()
-    else:
-        fusion = DummyFusion()
-
-    # Initialize extractors that weren't initialized during setup
-    for ext in extractors:
-        # FaceExtractor and PoseExtractor are already initialized
-        if ext.name not in ("face", "pose"):
-            ext.initialize()
-
-    visualizer = DebugVisualizer()
-
-    # Open video - try visualbase first, fallback to cv2
-    vb = None
-    source_info = None
-    stream = None
-    use_legacy = False
-
-    try:
-        from visualbase import VisualBase, FileSource
-
-        source = FileSource(video_path)
-        source.open()
-
-        # Check required API compatibility
-        for attr in ['fps', 'frame_count', 'width', 'height']:
-            if not hasattr(source, attr):
-                raise AttributeError(f"FileSource missing '{attr}'")
-
-        vb = VisualBase()
-        vb.connect(source)
-        stream = vb.get_stream(fps=int(fps))
-        source_info = source
-
-    except (ImportError, AttributeError, TypeError) as e:
-        logger.warning(f"visualbase API incompatible, using cv2 fallback: {e}")
-        use_legacy = True
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
-
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_skip = max(1, int(video_fps / fps)) if fps > 0 else 1
-
-        class _SourceInfo:
-            def __init__(self):
-                self.fps = video_fps
-                self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        source_info = _SourceInfo()
-
-        def _legacy_stream():
-            frame_id = 0
-            while True:
-                ret, image = cap.read()
-                if not ret:
-                    break
-                if frame_id % frame_skip == 0:
-                    t_ns = int(frame_id / video_fps * 1e9)
-                    yield Frame.from_array(image, frame_id=frame_id, t_src_ns=t_ns)
-                frame_id += 1
-
-        stream = _legacy_stream()
-
-    # Output writer
-    writer = None
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (source_info.width, source_info.height))
-
-    frame_count = 0
-    try:
-        for frame in stream:
-            # Run extractors
-            observations = {}
-            for ext in extractors:
-                obs = ext.extract(frame)
-                if obs:
-                    observations[ext.name] = obs
-
-            # Run fusion (use face observation if available)
-            fusion_obs = observations.get("face") or observations.get("dummy")
-            fusion_result = None
-            if fusion_obs:
-                fusion_result = fusion.update(fusion_obs)
-
-            # Create debug view
-            debug_image = visualizer.create_debug_view(
-                frame,
-                face_obs=observations.get("face") or observations.get("dummy"),
-                pose_obs=observations.get("pose"),
-                quality_obs=observations.get("quality"),
-                fusion_result=fusion_result,
-                is_gate_open=fusion.is_gate_open,
-                in_cooldown=fusion.in_cooldown,
-            )
-
-            # Write output
-            if writer:
-                writer.write(debug_image)
-
-            # Show window
-            if show_window:
-                cv2.imshow("Debug View", debug_image)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
-                elif key == ord("r"):
-                    fusion.reset()
-                    visualizer.reset()
-                elif key == ord(" "):
-                    cv2.waitKey(0)  # Pause
-
-            frame_count += 1
-
-            # Progress
-            if frame_count % 100 == 0:
-                logger.info(f"Processed {frame_count}/{source_info.frame_count} frames")
-
-    finally:
-        if vb:
-            vb.disconnect()
-        elif use_legacy:
-            cap.release()
-        if writer:
-            writer.release()
-        if show_window:
-            cv2.destroyAllWindows()
-
-        for ext in extractors:
-            ext.cleanup()
-
-    logger.info(f"Debug session complete. Processed {frame_count} frames.")

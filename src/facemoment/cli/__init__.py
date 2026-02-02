@@ -23,6 +23,7 @@ Examples:
   facemoment debug video.mp4 -e raw           # Raw video preview (no analysis)
   facemoment debug video.mp4 --no-ml          # Dummy mode (no ML)
   facemoment process video.mp4 -o ./clips     # Extract highlight clips
+  facemoment process video.mp4 --distributed  # Distributed mode (venv workers)
   facemoment benchmark video.mp4              # Performance benchmark
 """,
     )
@@ -40,6 +41,10 @@ Examples:
     info_parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Show detailed info including device capabilities",
+    )
+    info_parser.add_argument(
+        "--deps", action="store_true",
+        help="Show extractor dependency graph",
     )
 
     # debug command (unified)
@@ -67,6 +72,31 @@ Examples:
         "--profile", action="store_true",
         help="Show per-component timing information (detection, expression)"
     )
+    # Distributed mode options for debug
+    debug_parser.add_argument(
+        "--distributed", action="store_true",
+        help="Enable distributed processing with VenvWorker (requires zmq)"
+    )
+    debug_parser.add_argument(
+        "--venv-face", type=str, metavar="PATH",
+        help="Path to venv for face extractor (enables VENV isolation)"
+    )
+    debug_parser.add_argument(
+        "--venv-pose", type=str, metavar="PATH",
+        help="Path to venv for pose extractor (enables VENV isolation)"
+    )
+    debug_parser.add_argument(
+        "--venv-gesture", type=str, metavar="PATH",
+        help="Path to venv for gesture extractor (enables VENV isolation)"
+    )
+    debug_parser.add_argument(
+        "--config", type=str, metavar="PATH",
+        help="Path to pipeline config YAML file"
+    )
+    debug_parser.add_argument(
+        "--roi", type=str, metavar="X1,Y1,X2,Y2",
+        help="Face analysis ROI in normalized coords (0-1). Default: 0.1,0.1,0.9,0.9 (center 80%%)"
+    )
 
     # process command
     proc_parser = subparsers.add_parser("process", help="Process video and extract highlight clips")
@@ -78,9 +108,33 @@ Examples:
     proc_parser.add_argument("--report", type=str, help="Save processing report to JSON file")
     proc_parser.add_argument("--cooldown", type=float, default=2.0, help="Trigger cooldown (default: 2.0s)")
     proc_parser.add_argument("--head-turn-threshold", type=float, default=30.0)
-    proc_parser.add_argument("--gokart", action="store_true", help="Enable gokart mode (Phase 9)")
     proc_parser.add_argument("--trace", choices=["off", "minimal", "normal", "verbose"], default="off")
     proc_parser.add_argument("--trace-output", type=str)
+    # Distributed mode options
+    proc_parser.add_argument(
+        "--distributed", action="store_true",
+        help="Enable distributed processing with VenvWorker (requires zmq)"
+    )
+    proc_parser.add_argument(
+        "--venv-face", type=str, metavar="PATH",
+        help="Path to venv for face extractor (enables VENV isolation)"
+    )
+    proc_parser.add_argument(
+        "--venv-pose", type=str, metavar="PATH",
+        help="Path to venv for pose extractor (enables VENV isolation)"
+    )
+    proc_parser.add_argument(
+        "--venv-gesture", type=str, metavar="PATH",
+        help="Path to venv for gesture extractor (enables VENV isolation)"
+    )
+    proc_parser.add_argument(
+        "--config", type=str, metavar="PATH",
+        help="Path to pipeline config YAML file"
+    )
+    proc_parser.add_argument(
+        "--roi", type=str, metavar="X1,Y1,X2,Y2",
+        help="Face analysis ROI in normalized coords (0-1). Default: 0.1,0.1,0.9,0.9 (center 80%%)"
+    )
     # Legacy options (hidden)
     proc_parser.add_argument("--faces", type=int, default=2, help=argparse.SUPPRESS)
     proc_parser.add_argument("--threshold", type=float, default=0.7, help=argparse.SUPPRESS)

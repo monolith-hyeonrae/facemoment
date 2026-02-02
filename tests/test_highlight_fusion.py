@@ -19,8 +19,24 @@ def create_observation(
     center_distance: float = 0.1,
     quality_gate: float = 1.0,
     hand_wave: float = 0.0,
+    happy: float = None,  # Individual emotion overrides
+    angry: float = None,
+    neutral: float = None,
 ) -> Observation:
-    """Create a test observation with specified parameters."""
+    """Create a test observation with specified parameters.
+
+    If happy/angry/neutral are not specified, they are derived from expression:
+    - High expression (>0.5) maps to high happy
+    - Low expression (<0.3) maps to high neutral
+    """
+    # Derive emotions from expression if not specified
+    if happy is None:
+        happy = expression  # High expression = happy
+    if angry is None:
+        angry = 0.1  # Default low angry
+    if neutral is None:
+        neutral = max(0.0, 1.0 - expression)  # Inverse of expression
+
     faces = []
     for i in range(face_count):
         faces.append(
@@ -35,6 +51,11 @@ def create_observation(
                 area_ratio=area_ratio,
                 center_distance=center_distance,
                 expression=expression,
+                signals={
+                    "em_happy": happy,
+                    "em_angry": angry,
+                    "em_neutral": neutral,
+                },
             )
         )
 
@@ -45,6 +66,9 @@ def create_observation(
         signals={
             "face_count": face_count,
             "max_expression": expression,
+            "expression_happy": happy,
+            "expression_angry": angry,
+            "expression_neutral": neutral,
             "quality_gate": quality_gate,
             "hand_wave_detected": hand_wave,
             "hand_wave_confidence": hand_wave * 0.9,
@@ -166,6 +190,7 @@ class TestHighlightFusion:
             expression_z_threshold=1.5,
             consecutive_frames=2,
             cooldown_sec=0.5,
+            spike_sustain_sec=0.1,  # Short sustain for testing
         )
 
         frame_interval_ns = 33_333_333
@@ -180,8 +205,8 @@ class TestHighlightFusion:
             )
             fusion.update(obs)
 
-        # Now spike expression
-        for i in range(15, 20):
+        # Now spike expression (need enough frames for sustained spike + consecutive)
+        for i in range(15, 30):
             obs = create_observation(
                 frame_id=i,
                 t_ns=i * frame_interval_ns,
@@ -283,6 +308,7 @@ class TestHighlightFusion:
         fusion = HighlightFusion(
             gate_open_duration_sec=0.01,
             consecutive_frames=2,
+            spike_sustain_sec=0.1,  # Short sustain for testing
         )
 
         frame_interval_ns = 33_333_333
@@ -296,8 +322,8 @@ class TestHighlightFusion:
             )
             fusion.update(obs)
 
-        # Then trigger with high expression spike
-        for i in range(10, 20):
+        # Then trigger with high expression spike (need enough frames for sustained spike)
+        for i in range(10, 30):
             obs = create_observation(
                 frame_id=i,
                 t_ns=i * frame_interval_ns,
@@ -322,6 +348,7 @@ class TestHighlightFusion:
             consecutive_frames=2,
             pre_sec=1.5,
             post_sec=2.5,
+            spike_sustain_sec=0.1,  # Short sustain for testing
         )
 
         frame_interval_ns = 33_333_333
@@ -336,7 +363,7 @@ class TestHighlightFusion:
             fusion.update(obs)
 
         result = None
-        for i in range(10, 15):
+        for i in range(10, 30):
             obs = create_observation(
                 frame_id=i,
                 t_ns=i * frame_interval_ns,
@@ -422,7 +449,7 @@ class TestHighlightFusion:
 
 
 class TestHighlightFusionPhase9:
-    """Tests for Phase 9 gokart scenario features."""
+    """Tests for camera gaze and passenger interaction triggers."""
 
     def test_camera_gaze_detection_looking_at_camera(self):
         """Test camera gaze triggers when looking directly at camera."""
@@ -757,3 +784,189 @@ class TestHighlightFusionPhase9:
             assert result.trigger.label == "highlight"
             assert result.trigger.metadata is not None
             assert "reason" in result.trigger.metadata
+
+
+class TestHighlightFusionMainOnly:
+    """Tests for main-only mode (Phase 16)."""
+
+    def test_main_only_triggers_on_main_face(self):
+        """Test that only main face triggers in main-only mode."""
+        from facemoment.moment_detector.extractors.face_classifier import (
+            FaceClassifierOutput,
+            ClassifiedFace,
+        )
+
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            consecutive_frames=2,
+            cooldown_sec=0.5,
+            main_only=True,
+            spike_sustain_sec=0.1,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        def create_two_face_obs(
+            frame_id: int,
+            t_ns: int,
+            main_happy: float,
+            passenger_happy: float,
+        ) -> tuple:
+            """Create observation and classifier observation."""
+            main_face = FaceObservation(
+                face_id=1,
+                confidence=0.9,
+                bbox=(0.35, 0.2, 0.25, 0.35),
+                inside_frame=True,
+                yaw=15.0,
+                pitch=10.0,
+                area_ratio=0.08,
+                center_distance=0.1,
+                signals={"em_happy": main_happy},
+            )
+            passenger_face = FaceObservation(
+                face_id=2,
+                confidence=0.85,
+                bbox=(0.65, 0.3, 0.15, 0.25),
+                inside_frame=True,
+                yaw=15.0,
+                pitch=10.0,
+                area_ratio=0.04,
+                center_distance=0.2,
+                signals={"em_happy": passenger_happy},
+            )
+
+            obs = Observation(
+                source="test",
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={"face_count": 2, "quality_gate": 1.0},
+                faces=[main_face, passenger_face],
+            )
+
+            # Create classifier output
+            cf_main = ClassifiedFace(
+                face=main_face,
+                role="main",
+                confidence=0.9,
+                track_length=50,
+                avg_area=0.08,
+            )
+            cf_passenger = ClassifiedFace(
+                face=passenger_face,
+                role="passenger",
+                confidence=0.7,
+                track_length=30,
+                avg_area=0.04,
+            )
+
+            classifier_data = FaceClassifierOutput(
+                faces=[cf_main, cf_passenger],
+                main_face=cf_main,
+                passenger_faces=[cf_passenger],
+            )
+
+            classifier_obs = Observation(
+                source="face_classifier",
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={},
+                data=classifier_data,
+            )
+
+            return obs, classifier_obs
+
+        # Baseline phase: both faces at low happy
+        for i in range(15):
+            obs, classifier_obs = create_two_face_obs(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                main_happy=0.2,
+                passenger_happy=0.2,
+            )
+            fusion.update(obs, classifier_obs)
+
+        # Now passenger has high happy, main stays low -> should NOT trigger
+        for i in range(15, 30):
+            obs, classifier_obs = create_two_face_obs(
+                frame_id=i,
+                t_ns=i * frame_interval_ns,
+                main_happy=0.2,  # Main face stays low
+                passenger_happy=0.9,  # Passenger is very happy
+            )
+            result = fusion.update(obs, classifier_obs)
+            # Should not trigger because main face is not happy
+            assert not result.should_trigger, f"Should not trigger on passenger (frame {i})"
+
+    def test_main_only_ignores_passenger_expression(self):
+        """Test main-only mode ignores passenger expressions."""
+        from facemoment.moment_detector.extractors.face_classifier import (
+            FaceClassifierOutput,
+            ClassifiedFace,
+        )
+
+        fusion = HighlightFusion(
+            gate_open_duration_sec=0.01,
+            consecutive_frames=2,
+            cooldown_sec=0.5,
+            main_only=True,
+            spike_sustain_sec=0.1,
+        )
+
+        frame_interval_ns = 33_333_333
+
+        def create_obs(frame_id, t_ns, main_happy, passenger_happy):
+            main_face = FaceObservation(
+                face_id=1,
+                confidence=0.9,
+                bbox=(0.35, 0.2, 0.25, 0.35),
+                yaw=15.0,
+                pitch=10.0,
+                area_ratio=0.08,
+                signals={"em_happy": main_happy},
+            )
+            passenger_face = FaceObservation(
+                face_id=2,
+                confidence=0.85,
+                bbox=(0.65, 0.3, 0.15, 0.25),
+                yaw=15.0,
+                pitch=10.0,
+                area_ratio=0.04,
+                signals={"em_happy": passenger_happy},
+            )
+
+            obs = Observation(
+                source="test",
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={"face_count": 2, "quality_gate": 1.0},
+                faces=[main_face, passenger_face],
+            )
+
+            cf_main = ClassifiedFace(
+                face=main_face, role="main", confidence=0.9, track_length=50, avg_area=0.08,
+            )
+            classifier_data = FaceClassifierOutput(
+                faces=[cf_main], main_face=cf_main, passenger_faces=[],
+            )
+            classifier_obs = Observation(
+                source="face_classifier", frame_id=frame_id, t_ns=t_ns, signals={}, data=classifier_data,
+            )
+
+            return obs, classifier_obs
+
+        # Baseline
+        for i in range(15):
+            obs, classifier_obs = create_obs(i, i * frame_interval_ns, 0.2, 0.2)
+            fusion.update(obs, classifier_obs)
+
+        # Main face becomes happy -> should trigger
+        triggered = False
+        for i in range(15, 35):
+            obs, classifier_obs = create_obs(i, i * frame_interval_ns, 0.9, 0.2)
+            result = fusion.update(obs, classifier_obs)
+            if result.should_trigger:
+                triggered = True
+                break
+
+        assert triggered, "Should trigger when main face is happy"

@@ -7,7 +7,9 @@ Usage:
     from facemoment.moment_detector.extractors.backends import DetectedFace, FaceExpression
 
     # Import specific backends (requires corresponding dependencies)
-    from facemoment.moment_detector.extractors.backends.face_backends import InsightFaceSCRFD
+    from facemoment.moment_detector.extractors.backends.insightface import InsightFaceSCRFD
+    from facemoment.moment_detector.extractors.backends.hsemotion import HSEmotionBackend
+    from facemoment.moment_detector.extractors.backends.pyfeat import PyFeatBackend
     from facemoment.moment_detector.extractors.backends.pose_backends import YOLOPoseBackend
     from facemoment.moment_detector.extractors.backends.hand_backends import MediaPipeHandsBackend
 """
@@ -36,9 +38,9 @@ __all__ = [
     "PoseKeypoints",
     "HandLandmarks",
     # Lazy imports (import directly from submodule)
-    # "InsightFaceSCRFD",     # from .face_backends import InsightFaceSCRFD
-    # "PyFeatBackend",        # from .face_backends import PyFeatBackend
-    # "HSEmotionBackend",     # from .face_backends import HSEmotionBackend
+    # "InsightFaceSCRFD",     # from .insightface import InsightFaceSCRFD
+    # "PyFeatBackend",        # from .pyfeat import PyFeatBackend
+    # "HSEmotionBackend",     # from .hsemotion import HSEmotionBackend
     # "YOLOPoseBackend",      # from .pose_backends import YOLOPoseBackend
     # "MediaPipeHandsBackend",# from .hand_backends import MediaPipeHandsBackend
 ]
@@ -46,10 +48,17 @@ __all__ = [
 
 def __getattr__(name: str):
     """Lazy import for ML-dependent backends."""
-    # Face backends
-    if name in ("InsightFaceSCRFD", "PyFeatBackend", "HSEmotionBackend"):
-        from facemoment.moment_detector.extractors.backends import face_backends
-        return getattr(face_backends, name)
+    # Face detection backends
+    if name == "InsightFaceSCRFD":
+        from facemoment.moment_detector.extractors.backends.insightface import InsightFaceSCRFD
+        return InsightFaceSCRFD
+    # Expression backends
+    elif name == "PyFeatBackend":
+        from facemoment.moment_detector.extractors.backends.pyfeat import PyFeatBackend
+        return PyFeatBackend
+    elif name == "HSEmotionBackend":
+        from facemoment.moment_detector.extractors.backends.hsemotion import HSEmotionBackend
+        return HSEmotionBackend
     # Pose backends
     elif name == "YOLOPoseBackend":
         from facemoment.moment_detector.extractors.backends.pose_backends import YOLOPoseBackend

@@ -11,6 +11,214 @@ from facemoment.cli.utils import setup_observability, cleanup_observability
 
 def run_process(args):
     """Run video processing and clip extraction."""
+    # Check if distributed mode is requested
+    distributed = getattr(args, 'distributed', False)
+    config_path = getattr(args, 'config', None)
+    venv_face = getattr(args, 'venv_face', None)
+    venv_pose = getattr(args, 'venv_pose', None)
+    venv_gesture = getattr(args, 'venv_gesture', None)
+
+    # If any venv path is provided, enable distributed mode
+    if venv_face or venv_pose or venv_gesture or config_path:
+        distributed = True
+
+    if distributed:
+        _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture)
+    else:
+        _run_library(args)
+
+
+def _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture):
+    """Run processing in distributed mode using PipelineOrchestrator."""
+    from facemoment.pipeline import (
+        PipelineOrchestrator,
+        PipelineConfig,
+        create_default_config,
+    )
+
+    # Setup observability
+    trace_level = getattr(args, 'trace', 'off')
+    trace_output = getattr(args, 'trace_output', None)
+    hub, file_sink = setup_observability(trace_level, trace_output)
+
+    output_dir = Path(args.output_dir)
+
+    print(f"Processing: {args.path}")
+    print(f"FPS: {args.fps}")
+    print(f"Output: {output_dir}")
+    print(f"Mode: DISTRIBUTED")
+    print("-" * 50)
+
+    # Load or create config
+    if config_path:
+        print(f"Loading config from: {config_path}")
+        config = PipelineConfig.from_yaml(config_path)
+        # Override output dir and fps from CLI if provided
+        config.clip_output_dir = str(output_dir)
+        config.fps = args.fps
+        config.fusion.cooldown_sec = args.cooldown
+    else:
+        config = create_default_config(
+            venv_face=venv_face,
+            venv_pose=venv_pose,
+            venv_gesture=venv_gesture,
+            clip_output_dir=str(output_dir),
+            fps=args.fps,
+            cooldown_sec=args.cooldown,
+        )
+
+    # Print extractor configuration
+    print("Extractors:")
+    for ext_config in config.extractors:
+        isolation = ext_config.effective_isolation.name
+        venv = ext_config.venv_path or "(current)"
+        print(f"  {ext_config.name}: {isolation} [{venv}]")
+
+    print(f"Fusion: {config.fusion.name} (cooldown={config.fusion.cooldown_sec}s)")
+    print("-" * 50)
+
+    # Create orchestrator
+    orchestrator = PipelineOrchestrator.from_config(config)
+
+    # Track metadata for each clip
+    clip_metadata = []
+    start_time = time.time()
+
+    def on_trigger(trigger, result):
+        event_time_sec = trigger.event_time_ns / 1e9 if trigger.event_time_ns else 0
+        meta = {
+            "trigger_id": len(clip_metadata) + 1,
+            "reason": result.reason,
+            "score": result.score,
+            "timestamp_sec": event_time_sec,
+            "metadata": result.metadata,
+        }
+        clip_metadata.append(meta)
+        print(f"\n  TRIGGER #{meta['trigger_id']}: {result.reason} (score={result.score:.2f}, t={event_time_sec:.2f}s)")
+
+    orchestrator.set_on_trigger(on_trigger)
+
+    # Progress tracking
+    last_progress = [0]
+    def on_frame(frame):
+        if frame.frame_id % 100 == 0 and frame.frame_id > last_progress[0]:
+            last_progress[0] = frame.frame_id
+            print(f"\r  Processing frame {frame.frame_id}...", end="", flush=True)
+
+    orchestrator.set_on_frame(on_frame)
+
+    # Process video
+    print("Processing video...")
+    try:
+        clips = orchestrator.run(args.path, fps=args.fps)
+    except Exception as e:
+        print(f"\nError during processing: {e}")
+        cleanup_observability(hub, file_sink)
+        sys.exit(1)
+
+    print()
+
+    # Get stats
+    stats = orchestrator.get_stats()
+    elapsed = stats.processing_time_sec
+
+    print("-" * 50)
+    print(f"Processing complete in {elapsed:.1f}s")
+    print(f"  Frames processed: {stats.frames_processed}")
+    print(f"  Triggers fired: {stats.triggers_fired}")
+    print(f"  Clips extracted: {stats.clips_extracted}")
+    if stats.avg_frame_time_ms > 0:
+        print(f"  Avg frame time: {stats.avg_frame_time_ms:.1f}ms")
+    print()
+
+    # Print worker stats
+    if stats.worker_stats:
+        print("Worker statistics:")
+        for name, ws in stats.worker_stats.items():
+            if ws["frames"] > 0:
+                avg_ms = ws["total_ms"] / ws["frames"]
+                print(f"  {name}: {ws['frames']} frames, avg {avg_ms:.1f}ms, errors: {ws['errors']}")
+
+    print()
+
+    # Save metadata for each clip
+    for i, clip in enumerate(clips):
+        if clip.success and clip.output_path:
+            clip_path = Path(clip.output_path)
+            meta_path = clip_path.with_suffix(".json")
+
+            trigger_meta = clip_metadata[i] if i < len(clip_metadata) else {}
+
+            full_meta = {
+                "clip_id": clip_path.stem,
+                "video_source": str(Path(args.path).resolve()),
+                "created_at": datetime.now().isoformat(),
+                "mode": "distributed",
+                "trigger": trigger_meta,
+                "clip": {
+                    "output_path": str(clip_path),
+                    "duration_sec": clip.duration_sec,
+                    "success": clip.success,
+                },
+            }
+
+            with open(meta_path, "w") as f:
+                json.dump(full_meta, f, indent=2, default=str)
+
+            print(f"  [{i+1}] {clip_path.name} ({clip.duration_sec:.2f}s)")
+            print(f"      Reason: {trigger_meta.get('reason', 'unknown')}")
+        else:
+            print(f"  [{i+1}] FAILED: {clip.error}")
+
+    # Save processing report if requested
+    if args.report:
+        report = {
+            "video_source": str(Path(args.path).resolve()),
+            "processed_at": datetime.now().isoformat(),
+            "mode": "distributed",
+            "settings": {
+                "fps": args.fps,
+                "cooldown_sec": args.cooldown,
+                "extractors": [
+                    {
+                        "name": ext.name,
+                        "isolation": ext.effective_isolation.name,
+                        "venv_path": ext.venv_path,
+                    }
+                    for ext in config.extractors
+                ],
+            },
+            "results": {
+                "frames_processed": stats.frames_processed,
+                "triggers_fired": stats.triggers_fired,
+                "clips_extracted": stats.clips_extracted,
+                "processing_time_sec": elapsed,
+                "avg_frame_time_ms": stats.avg_frame_time_ms,
+            },
+            "worker_stats": stats.worker_stats,
+            "clips": [
+                {
+                    "clip_id": Path(c.output_path).stem if c.output_path else None,
+                    "success": c.success,
+                    "duration_sec": c.duration_sec,
+                    "error": c.error,
+                    "trigger": clip_metadata[i] if i < len(clip_metadata) else None,
+                }
+                for i, c in enumerate(clips)
+            ],
+        }
+
+        report_path = Path(args.report)
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2, default=str)
+        print()
+        print(f"Report saved: {report_path}")
+
+    cleanup_observability(hub, file_sink)
+
+
+def _run_library(args):
+    """Run processing in library mode (original implementation)."""
     from facemoment import MomentDetector
     from facemoment.moment_detector.extractors import DummyExtractor, QualityExtractor
     from facemoment.moment_detector.fusion import DummyFusion
@@ -28,14 +236,12 @@ def run_process(args):
     fusion = None
     use_ml = args.use_ml
     ml_mode = "auto" if use_ml is None else ("enabled" if use_ml else "disabled")
-    gokart_mode = getattr(args, 'gokart', False)
 
     print(f"Processing: {args.path}")
     print(f"FPS: {args.fps}")
     print(f"Output: {output_dir}")
+    print(f"Mode: LIBRARY")
     print(f"ML backends: {ml_mode}")
-    if gokart_mode:
-        print(f"Mode: GOKART (Phase 9)")
     print("-" * 50)
 
     # Try to load and initialize ML extractors
@@ -70,17 +276,16 @@ def run_process(args):
                 sys.exit(1)
             print(f"  PoseExtractor: disabled ({type(e).__name__})")
 
-        # Add GestureExtractor if gokart mode is enabled
-        if gokart_mode:
-            try:
-                from facemoment.moment_detector.extractors import GestureExtractor
-                gesture_ext = GestureExtractor()
-                gesture_ext.initialize()
-                extractors.append(gesture_ext)
-                gesture_available = True
-                print("  GestureExtractor: enabled (gokart)")
-            except Exception as e:
-                print(f"  GestureExtractor: disabled ({type(e).__name__})")
+        # Try to load GestureExtractor if available
+        try:
+            from facemoment.moment_detector.extractors import GestureExtractor
+            gesture_ext = GestureExtractor()
+            gesture_ext.initialize()
+            extractors.append(gesture_ext)
+            gesture_available = True
+            print("  GestureExtractor: enabled")
+        except Exception as e:
+            print(f"  GestureExtractor: disabled ({type(e).__name__})")
 
     # Add QualityExtractor (always available)
     extractors.append(QualityExtractor())
@@ -97,22 +302,11 @@ def run_process(args):
     # Set up fusion
     if face_available:
         from facemoment.moment_detector.fusion import HighlightFusion
-        if gokart_mode:
-            fusion = HighlightFusion(
-                cooldown_sec=args.cooldown,
-                head_turn_velocity_threshold=args.head_turn_threshold,
-                gaze_yaw_threshold=10.0,
-                gaze_pitch_threshold=15.0,
-                gaze_score_threshold=0.5,
-                interaction_yaw_threshold=15.0,
-            )
-            print(f"  HighlightFusion: enabled (gokart mode, cooldown={args.cooldown}s)")
-        else:
-            fusion = HighlightFusion(
-                cooldown_sec=args.cooldown,
-                head_turn_velocity_threshold=args.head_turn_threshold,
-            )
-            print(f"  HighlightFusion: enabled (cooldown={args.cooldown}s, head_turn_threshold={args.head_turn_threshold}°/s)")
+        fusion = HighlightFusion(
+            cooldown_sec=args.cooldown,
+            head_turn_velocity_threshold=args.head_turn_threshold,
+        )
+        print(f"  HighlightFusion: enabled (cooldown={args.cooldown}s)")
     else:
         fusion = DummyFusion(
             expression_threshold=args.threshold,
@@ -129,14 +323,13 @@ def run_process(args):
         has_expression = face_ext and getattr(face_ext, '_expression_backend', None) is not None
         print(f"  - expression_spike: {'enabled' if has_expression else 'DISABLED (install py-feat)'}")
         print(f"  - head_turn: enabled")
-        if gokart_mode:
-            print(f"  - camera_gaze: enabled (gokart)")
-            print(f"  - passenger_interaction: enabled (gokart)")
+        print(f"  - camera_gaze: enabled")
+        print(f"  - passenger_interaction: enabled")
     if pose_available:
         print(f"  - hand_wave: enabled")
     if gesture_available:
-        print(f"  - gesture_vsign: enabled (gokart)")
-        print(f"  - gesture_thumbsup: enabled (gokart)")
+        print(f"  - gesture_vsign: enabled")
+        print(f"  - gesture_thumbsup: enabled")
     if not face_available and not pose_available:
         print(f"  - dummy triggers only")
 
@@ -154,16 +347,16 @@ def run_process(args):
     start_time = time.time()
 
     def on_trigger(trigger, result):
+        event_time_sec = trigger.event_time_ns / 1e9 if trigger.event_time_ns else 0
         meta = {
             "trigger_id": len(clip_metadata) + 1,
             "reason": result.reason,
             "score": result.score,
-            "frame_id": trigger.frame_id,
-            "timestamp_sec": trigger.t_ns / 1e9 if hasattr(trigger, 't_ns') else 0,
+            "timestamp_sec": event_time_sec,
             "metadata": result.metadata,
         }
         clip_metadata.append(meta)
-        print(f"\n  TRIGGER #{meta['trigger_id']}: {result.reason} (score={result.score:.2f}, frame={trigger.frame_id})")
+        print(f"\n  TRIGGER #{meta['trigger_id']}: {result.reason} (score={result.score:.2f}, t={event_time_sec:.2f}s)")
 
     detector.set_on_trigger(on_trigger)
 
@@ -201,6 +394,7 @@ def run_process(args):
                 "clip_id": clip_path.stem,
                 "video_source": str(Path(args.path).resolve()),
                 "created_at": datetime.now().isoformat(),
+                "mode": "library",
                 "trigger": trigger_meta,
                 "clip": {
                     "output_path": str(clip_path),
@@ -222,6 +416,7 @@ def run_process(args):
         report = {
             "video_source": str(Path(args.path).resolve()),
             "processed_at": datetime.now().isoformat(),
+            "mode": "library",
             "settings": {
                 "fps": args.fps,
                 "cooldown_sec": args.cooldown,

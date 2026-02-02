@@ -1,7 +1,6 @@
-"""Gesture extractor for hand gesture recognition (Phase 9)."""
+"""Gesture extractor for hand gesture recognition."""
 
 from typing import Optional, List, Dict
-from enum import Enum
 import logging
 import time
 
@@ -13,6 +12,7 @@ from facemoment.moment_detector.extractors.base import (
     BaseExtractor,
     Observation,
 )
+from facemoment.moment_detector.extractors.types import GestureType, HandLandmarkIndex
 from facemoment.moment_detector.extractors.backends.base import (
     HandLandmarkBackend,
     HandLandmarks,
@@ -24,44 +24,6 @@ logger = logging.getLogger(__name__)
 
 # Get the global observability hub
 _hub = ObservabilityHub.get_instance()
-
-
-class GestureType(Enum):
-    """Recognized gesture types."""
-
-    NONE = "none"
-    V_SIGN = "v_sign"
-    THUMBS_UP = "thumbs_up"
-    OK_SIGN = "ok_sign"
-    OPEN_PALM = "open_palm"
-    FIST = "fist"
-    POINTING = "pointing"
-
-
-class HandLandmarkIndex:
-    """MediaPipe hand landmark indices."""
-
-    WRIST = 0
-    THUMB_CMC = 1
-    THUMB_MCP = 2
-    THUMB_IP = 3
-    THUMB_TIP = 4
-    INDEX_FINGER_MCP = 5
-    INDEX_FINGER_PIP = 6
-    INDEX_FINGER_DIP = 7
-    INDEX_FINGER_TIP = 8
-    MIDDLE_FINGER_MCP = 9
-    MIDDLE_FINGER_PIP = 10
-    MIDDLE_FINGER_DIP = 11
-    MIDDLE_FINGER_TIP = 12
-    RING_FINGER_MCP = 13
-    RING_FINGER_PIP = 14
-    RING_FINGER_DIP = 15
-    RING_FINGER_TIP = 16
-    PINKY_MCP = 17
-    PINKY_PIP = 18
-    PINKY_DIP = 19
-    PINKY_TIP = 20
 
 
 class GestureExtractor(BaseExtractor):

@@ -142,6 +142,7 @@ class TestFaceExtractor:
         extractor = FaceExtractor(
             face_backend=face_backend,
             expression_backend=expr_backend,
+            roi=(0, 0, 1, 1),  # Full frame - no ROI filtering for this test
         )
         extractor.initialize()
 
@@ -171,6 +172,7 @@ class TestFaceExtractor:
             face_backend=face_backend,
             expression_backend=expr_backend,
             track_faces=True,
+            roi=(0, 0, 1, 1),  # Full frame - no ROI filtering for tracking test
         )
         extractor.initialize()
 
@@ -218,9 +220,11 @@ class TestFaceExtractor:
         face_backend = MockFaceBackend(faces=[face_edge])
         expr_backend = MockExpressionBackend(expressions=[FaceExpression()])
 
+        # Use full-frame ROI to test inside_frame detection without ROI filtering
         extractor = FaceExtractor(
             face_backend=face_backend,
             expression_backend=expr_backend,
+            roi=(0, 0, 1, 1),  # Full frame - no ROI filtering
         )
         extractor.initialize()
 
@@ -271,3 +275,54 @@ class TestFaceExtractor:
             )
             obs = extractor.extract(frame)
             assert obs is not None
+
+    def test_roi_filtering(self):
+        """Test ROI filtering excludes faces outside region."""
+        # Face in center of frame (inside ROI) - center at (320, 240) = (0.5, 0.5)
+        face_center = DetectedFace(bbox=(270, 190, 100, 100), confidence=0.9)
+        # Face in top-left corner (outside default ROI) - center at (25, 25) = (0.04, 0.05)
+        face_corner = DetectedFace(bbox=(0, 0, 50, 50), confidence=0.9)
+
+        face_backend = MockFaceBackend(faces=[face_center, face_corner])
+        expr_backend = MockExpressionBackend(expressions=[FaceExpression(), FaceExpression()])
+
+        # Default ROI (0.3, 0.1, 0.7, 0.6) should filter out corner face
+        extractor = FaceExtractor(
+            face_backend=face_backend,
+            expression_backend=expr_backend,
+        )
+        extractor.initialize()
+
+        frame = Frame.from_array(
+            np.zeros((480, 640, 3), dtype=np.uint8),
+            frame_id=0,
+            t_src_ns=0,
+        )
+        obs = extractor.extract(frame)
+
+        # Only center face should be included (corner face filtered out)
+        assert obs.signals["face_count"] == 1
+        assert len(obs.faces) == 1
+
+        extractor.cleanup()
+
+    def test_roi_property(self):
+        """Test ROI property getter and setter."""
+        extractor = FaceExtractor()
+
+        # Default ROI (center 40% width, top 50% height)
+        assert extractor.roi == (0.3, 0.1, 0.7, 0.6)
+
+        # Valid ROI update
+        extractor.roi = (0.2, 0.2, 0.8, 0.8)
+        assert extractor.roi == (0.2, 0.2, 0.8, 0.8)
+
+        # Invalid ROI should raise
+        with pytest.raises(ValueError):
+            extractor.roi = (0.8, 0.2, 0.2, 0.8)  # x1 > x2
+
+        with pytest.raises(ValueError):
+            extractor.roi = (-0.1, 0.2, 0.8, 0.8)  # x1 < 0
+
+        with pytest.raises(ValueError):
+            extractor.roi = (0.2, 0.2, 1.1, 0.8)  # x2 > 1

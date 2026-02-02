@@ -9,6 +9,7 @@ from visualbase import Trigger
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
 from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.moment_detector.extractors.face_classifier import FaceClassifierOutput
 from facemoment.observability import ObservabilityHub, TraceLevel
 from facemoment.observability.records import (
     GateChangeRecord,
@@ -30,6 +31,38 @@ class ExpressionState:
     ewma: float = 0.0
     ewma_var: float = 0.01  # Variance for z-score
     count: int = 0
+
+
+@dataclass
+class AdaptiveEmotionState:
+    """Adaptive per-face happy tracking with baseline and recent values.
+
+    Tracks happy emotion with:
+    - baseline: Slow-moving average representing the person's "normal" happy level
+    - recent: Fast-moving average representing current happy level
+    - spike: recent - baseline, representing relative change from normal
+    - spike_start_ns: When spike first exceeded threshold (for sustained detection)
+
+    This allows detecting happy spikes relative to each person's baseline,
+    not absolute thresholds.
+    """
+
+    # Baseline (slow EWMA, α≈0.02) - person's typical happy level
+    baseline: float = 0.3
+
+    # Recent (fast EWMA, α≈0.08) - current happy level (smoothed over ~1sec)
+    recent: float = 0.3
+
+    # Frame count for warmup
+    count: int = 0
+
+    # Spike sustain tracking
+    spike_start_ns: Optional[int] = None  # When spike first exceeded threshold
+
+    @property
+    def spike(self) -> float:
+        """Happy spike (recent - baseline)."""
+        return self.recent - self.baseline
 
 
 class HighlightFusion(BaseFusion):
@@ -92,9 +125,14 @@ class HighlightFusion(BaseFusion):
         # Hysteresis
         gate_open_duration_sec: float = 0.7,
         gate_close_duration_sec: float = 0.3,
-        # Expression detection
+        # Expression detection (legacy z-score method)
         expression_z_threshold: float = 2.0,
         ewma_alpha: float = 0.1,
+        # Adaptive emotion detection (new relative spike method)
+        baseline_alpha: float = 0.02,  # Slow: person's typical emotion levels
+        recent_alpha: float = 0.08,    # Smoothed over ~1sec at 10fps
+        spike_threshold: float = 0.12, # Trigger when spike exceeds this
+        spike_sustain_sec: float = 1.0, # Spike must sustain for this duration
         # Head turn detection
         head_turn_velocity_threshold: float = 30.0,
         # Timing
@@ -108,6 +146,8 @@ class HighlightFusion(BaseFusion):
         gaze_score_threshold: float = 0.5,
         # Passenger interaction detection (Phase 9)
         interaction_yaw_threshold: float = 15.0,
+        # Main-only mode (Phase 16)
+        main_only: bool = True,
     ):
         # Gate parameters
         self._face_conf_threshold = face_conf_threshold
@@ -120,10 +160,16 @@ class HighlightFusion(BaseFusion):
         self._gate_open_duration_ns = int(gate_open_duration_sec * 1e9)
         self._gate_close_duration_ns = int(gate_close_duration_sec * 1e9)
 
-        # Detection parameters
+        # Detection parameters (legacy)
         self._expr_z_threshold = expression_z_threshold
         self._ewma_alpha = ewma_alpha
         self._head_turn_vel_threshold = head_turn_velocity_threshold
+
+        # Adaptive emotion detection parameters
+        self._baseline_alpha = baseline_alpha
+        self._recent_alpha = recent_alpha
+        self._spike_threshold = spike_threshold
+        self._spike_sustain_ns = int(spike_sustain_sec * 1e9)
 
         # Camera gaze detection parameters (Phase 9)
         self._gaze_yaw_threshold = gaze_yaw_threshold
@@ -132,6 +178,10 @@ class HighlightFusion(BaseFusion):
 
         # Passenger interaction parameters (Phase 9)
         self._interaction_yaw_threshold = interaction_yaw_threshold
+
+        # Main-only mode (Phase 16): only trigger on main face
+        self._main_only = main_only
+        self._main_face_id: Optional[int] = None  # Current main face ID
 
         # Timing
         self._cooldown_ns = int(cooldown_sec * 1e9)
@@ -152,8 +202,14 @@ class HighlightFusion(BaseFusion):
         # Cooldown
         self._last_trigger_ns: Optional[int] = None
 
-        # Expression tracking (per face ID)
+        # Main face tracking (Phase 16)
+        self._main_face_id: Optional[int] = None
+
+        # Expression tracking (per face ID) - legacy z-score method
         self._expression_states: Dict[int, ExpressionState] = {}
+
+        # Adaptive emotion tracking (per face ID) - new relative spike method
+        self._adaptive_states: Dict[int, AdaptiveEmotionState] = {}
 
         # Head pose tracking (per face ID)
         self._prev_yaw: Dict[int, tuple[int, float]] = {}  # face_id -> (t_ns, yaw)
@@ -167,11 +223,16 @@ class HighlightFusion(BaseFusion):
         self._recent_observations: deque[Observation] = deque(maxlen=30)
         self._observation_count = 0
 
-    def update(self, observation: Observation) -> FusionResult:
+    def update(
+        self,
+        observation: Observation,
+        classifier_obs: Optional[Observation] = None,
+    ) -> FusionResult:
         """Process observation and decide on trigger.
 
         Args:
             observation: New observation from extractors.
+            classifier_obs: Optional face classifier observation for main-only mode.
 
         Returns:
             FusionResult indicating trigger decision.
@@ -179,6 +240,9 @@ class HighlightFusion(BaseFusion):
         self._recent_observations.append(observation)
         self._observation_count += 1
         t_ns = observation.t_ns
+
+        # Update main face ID from classifier (Phase 16)
+        self._update_main_face_id(classifier_obs)
 
         # 1. Check cooldown
         if self._in_cooldown(t_ns):
@@ -197,7 +261,7 @@ class HighlightFusion(BaseFusion):
             return FusionResult(
                 should_trigger=False,
                 observations_used=self._observation_count,
-                metadata={"state": "cooldown"},
+                metadata={"state": "cooldown", "adaptive_summary": self.get_adaptive_summary()},
             )
 
         # 2. Update gate with hysteresis
@@ -221,7 +285,11 @@ class HighlightFusion(BaseFusion):
             return FusionResult(
                 should_trigger=False,
                 observations_used=self._observation_count,
-                metadata={"state": "gate_closed", "conditions_met": gate_conditions_met},
+                metadata={
+                    "state": "gate_closed",
+                    "conditions_met": gate_conditions_met,
+                    "adaptive_summary": self.get_adaptive_summary(),
+                },
             )
 
         # 3. Detect trigger events and collect candidates
@@ -350,7 +418,10 @@ class HighlightFusion(BaseFusion):
                 score=score,
                 reason=reason,
                 observations_used=self._observation_count,
-                metadata={"consecutive_frames": self._consecutive_required},
+                metadata={
+                    "consecutive_frames": self._consecutive_required,
+                    "adaptive_summary": self.get_adaptive_summary(),
+                },
             )
 
         # Emit trigger decision record (no trigger)
@@ -381,6 +452,7 @@ class HighlightFusion(BaseFusion):
                 "gate_open": self._gate_open,
                 "consecutive_high": self._consecutive_high,
                 "pending_reason": self._pending_trigger_reason,
+                "adaptive_summary": self.get_adaptive_summary(),
             },
         )
 
@@ -519,56 +591,83 @@ class HighlightFusion(BaseFusion):
                         ))
 
     def _detect_expression_spike(self, observation: Observation) -> Optional[float]:
-        """Detect expression spikes using EWMA and z-score.
+        """Detect sustained happy spikes using adaptive baseline tracking.
+
+        Uses per-face adaptive tracking:
+        - baseline (slow EWMA): Person's typical happy level
+        - recent (smoothed EWMA): Current happy level averaged over ~1sec
+        - spike = recent - baseline: Relative change from normal
+        - Spike must sustain above threshold for spike_sustain_sec
+
+        This detects when someone's happy rises above THEIR normal level
+        and STAYS elevated, filtering out brief fluctuations.
+
+        Note: In main-only mode, only analyzes the main face.
 
         Args:
             observation: Current observation.
 
         Returns:
-            Spike score if detected, None otherwise.
+            Spike score if sustained spike detected, None otherwise.
         """
-        max_spike = None
+        t_ns = observation.t_ns
+        max_spike_score = None
 
-        for face in observation.faces:
+        # Get target faces (main only in main-only mode)
+        target_faces = self._get_target_faces(observation)
+
+        for face in target_faces:
             face_id = face.face_id
-            expression = face.expression
 
-            # Get or create expression state
-            if face_id not in self._expression_states:
-                self._expression_states[face_id] = ExpressionState()
+            # Get happy value from face signals
+            happy = face.signals.get("em_happy", 0.0)
 
-            state = self._expression_states[face_id]
-
-            # Update EWMA
-            if state.count == 0:
-                state.ewma = expression
-                state.ewma_var = 0.01
-            else:
-                # Update mean
-                delta = expression - state.ewma
-                state.ewma = state.ewma + self._ewma_alpha * delta
-
-                # Update variance (exponentially weighted)
-                state.ewma_var = (1 - self._ewma_alpha) * (
-                    state.ewma_var + self._ewma_alpha * delta * delta
+            # Get or create adaptive state
+            if face_id not in self._adaptive_states:
+                self._adaptive_states[face_id] = AdaptiveEmotionState(
+                    baseline=happy,
+                    recent=happy,
                 )
+
+            state = self._adaptive_states[face_id]
+
+            # Update baseline (slow EWMA) - person's typical happy level
+            state.baseline += self._baseline_alpha * (happy - state.baseline)
+
+            # Update recent (smoothed EWMA) - current happy level
+            state.recent += self._recent_alpha * (happy - state.recent)
 
             state.count += 1
 
-            # Compute z-score
-            std = max(0.05, state.ewma_var ** 0.5)  # Min std to avoid division issues
-            z_score = (expression - state.ewma) / std
+            # Skip warmup period (need baseline to stabilize)
+            if state.count < 10:
+                continue
 
-            # Check for spike
-            if z_score > self._expr_z_threshold and expression > 0.5:
-                spike_score = min(1.0, z_score / (self._expr_z_threshold * 2))
-                if max_spike is None or spike_score > max_spike:
-                    max_spike = spike_score
+            # Check for spike (relative to baseline)
+            spike = state.spike
 
-        return max_spike
+            if spike > self._spike_threshold:
+                # Track when spike started
+                if state.spike_start_ns is None:
+                    state.spike_start_ns = t_ns
+
+                # Check if spike has sustained long enough
+                spike_duration_ns = t_ns - state.spike_start_ns
+                if spike_duration_ns >= self._spike_sustain_ns:
+                    # Sustained spike! Calculate score
+                    spike_score = min(1.0, spike / (self._spike_threshold * 2))
+                    if max_spike_score is None or spike_score > max_spike_score:
+                        max_spike_score = spike_score
+            else:
+                # Spike dropped below threshold, reset timer
+                state.spike_start_ns = None
+
+        return max_spike_score
 
     def _detect_head_turn(self, observation: Observation) -> Optional[float]:
         """Detect head turn events.
+
+        Note: In main-only mode, only analyzes the main face.
 
         Args:
             observation: Current observation.
@@ -579,7 +678,10 @@ class HighlightFusion(BaseFusion):
         t_ns = observation.t_ns
         max_turn = None
 
-        for face in observation.faces:
+        # Get target faces (main only in main-only mode)
+        target_faces = self._get_target_faces(observation)
+
+        for face in target_faces:
             face_id = face.face_id
             yaw = face.yaw
 
@@ -611,19 +713,24 @@ class HighlightFusion(BaseFusion):
         For gokart scenario, camera is mounted in front facing the driver.
         Looking at camera means yaw and pitch are close to 0.
 
+        Note: In main-only mode, only analyzes the main face.
+
         Args:
             observation: Current observation.
 
         Returns:
             Tuple of (detected, score).
         """
-        if not observation.faces:
+        # Get target faces (main only in main-only mode)
+        target_faces = self._get_target_faces(observation)
+
+        if not target_faces:
             return False, 0.0
 
         max_score = 0.0
         detected = False
 
-        for face in observation.faces:
+        for face in target_faces:
             # Calculate gaze score based on how centered the head pose is
             # yaw close to 0 = looking straight ahead at camera
             # pitch close to 0 = not looking up or down
@@ -778,6 +885,38 @@ class HighlightFusion(BaseFusion):
             return False
         return (t_ns - self._last_trigger_ns) < self._cooldown_ns
 
+    def _update_main_face_id(self, classifier_obs: Optional[Observation]) -> None:
+        """Update main face ID from classifier observation.
+
+        Args:
+            classifier_obs: Face classifier observation.
+        """
+        if classifier_obs is None or classifier_obs.data is None:
+            return
+
+        data = classifier_obs.data
+        if hasattr(data, 'main_face') and data.main_face is not None:
+            self._main_face_id = data.main_face.face.face_id
+
+    def _get_target_faces(self, observation: Observation) -> List[FaceObservation]:
+        """Get faces to analyze based on main-only mode.
+
+        Args:
+            observation: Current observation.
+
+        Returns:
+            List of faces to analyze (main only if main_only mode).
+        """
+        faces = observation.faces
+
+        if not self._main_only or self._main_face_id is None:
+            # Not in main-only mode or no main face identified yet
+            return faces
+
+        # Filter to only the main face
+        main_faces = [f for f in faces if f.face_id == self._main_face_id]
+        return main_faces if main_faces else faces  # Fallback to all if main not found
+
     def reset(self) -> None:
         """Reset fusion state."""
         self._reset_state()
@@ -789,3 +928,52 @@ class HighlightFusion(BaseFusion):
     @property
     def in_cooldown(self) -> bool:
         return self._last_trigger_ns is not None
+
+    @property
+    def adaptive_states(self) -> Dict[int, AdaptiveEmotionState]:
+        """Get adaptive emotion states for visualization."""
+        return self._adaptive_states
+
+    def get_adaptive_summary(self) -> Dict[str, any]:
+        """Get summary of adaptive happy tracking for visualization.
+
+        Returns:
+            Dictionary with:
+            - states: Per-face adaptive states (baseline, recent, spike, sustain_pct)
+            - max_spike: Current maximum spike across all faces
+            - threshold: Spike threshold for triggering
+            - sustain_sec: Required sustain duration
+        """
+        if not self._adaptive_states:
+            return {
+                "states": {},
+                "max_spike": 0.0,
+                "threshold": self._spike_threshold,
+                "sustain_sec": self._spike_sustain_ns / 1e9,
+            }
+
+        # Find face with maximum spike
+        max_spike = 0.0
+        max_sustain_pct = 0.0
+
+        for face_id, state in self._adaptive_states.items():
+            if state.count < 10:
+                continue
+
+            if state.spike > max_spike:
+                max_spike = state.spike
+
+        return {
+            "states": {
+                fid: {
+                    "baseline": s.baseline,
+                    "recent": s.recent,
+                    "spike": s.spike,
+                    "sustain_pct": 0.0 if s.spike_start_ns is None else 1.0,  # Simplified
+                }
+                for fid, s in self._adaptive_states.items()
+            },
+            "max_spike": max_spike,
+            "threshold": self._spike_threshold,
+            "sustain_sec": self._spike_sustain_ns / 1e9,
+        }

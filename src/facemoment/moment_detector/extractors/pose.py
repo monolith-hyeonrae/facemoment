@@ -13,6 +13,8 @@ from facemoment.moment_detector.extractors.base import (
     BaseExtractor,
     Observation,
 )
+from facemoment.moment_detector.extractors.types import KeypointIndex
+from facemoment.moment_detector.extractors.outputs import PoseOutput
 from facemoment.moment_detector.extractors.backends.base import (
     PoseBackend,
     PoseKeypoints,
@@ -24,27 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Get the global observability hub
 _hub = ObservabilityHub.get_instance()
-
-
-# Keypoint indices for COCO 17 format
-class KeypointIndex:
-    NOSE = 0
-    LEFT_EYE = 1
-    RIGHT_EYE = 2
-    LEFT_EAR = 3
-    RIGHT_EAR = 4
-    LEFT_SHOULDER = 5
-    RIGHT_SHOULDER = 6
-    LEFT_ELBOW = 7
-    RIGHT_ELBOW = 8
-    LEFT_WRIST = 9
-    RIGHT_WRIST = 10
-    LEFT_HIP = 11
-    RIGHT_HIP = 12
-    LEFT_KNEE = 13
-    RIGHT_KNEE = 14
-    LEFT_ANKLE = 15
-    RIGHT_ANKLE = 16
 
 
 class PoseExtractor(BaseExtractor):
@@ -161,6 +142,7 @@ class PoseExtractor(BaseExtractor):
                     "hands_raised_count": 0,
                     "hand_wave_detected": 0.0,
                 },
+                data=PoseOutput(keypoints=[], person_count=0),
             )
 
         # Analyze each pose
@@ -219,11 +201,21 @@ class PoseExtractor(BaseExtractor):
             processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
             self._emit_extract_record(frame, len(poses), wave_detected, processing_ms, signals)
 
+        # Build keypoints data for visualization
+        keypoints_data = []
+        for pose in poses:
+            keypoints_data.append({
+                "person_id": pose.person_id or 0,
+                "keypoints": pose.keypoints.tolist(),  # (17, 3) array
+                "image_size": (w, h),
+            })
+
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
             t_ns=t_ns,
             signals=signals,
+            data=PoseOutput(keypoints=keypoints_data, person_count=len(poses)),
             metadata={
                 "wave_detected": wave_detected,
                 "poses_detected": len(poses),

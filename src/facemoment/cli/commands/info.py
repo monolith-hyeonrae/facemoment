@@ -8,6 +8,11 @@ import sys
 
 def run_info(args):
     """Show system information and available components."""
+    # Handle --deps flag
+    if getattr(args, 'deps', False):
+        _print_dependency_graph()
+        return
+
     print("FaceMoment - System Information")
     print("=" * 60)
 
@@ -136,10 +141,10 @@ def _print_trigger_types():
         ("expression_spike", "FaceExtractor", "Sudden expression change"),
         ("head_turn", "FaceExtractor", "Fast head rotation"),
         ("hand_wave", "PoseExtractor", "Hand waving motion"),
-        ("camera_gaze", "FaceExtractor", "Looking at camera (gokart)"),
-        ("passenger_interaction", "FaceExtractor", "Facing each other (gokart)"),
-        ("gesture_vsign", "GestureExtractor", "V-sign gesture (gokart)"),
-        ("gesture_thumbsup", "GestureExtractor", "Thumbs up gesture (gokart)"),
+        ("camera_gaze", "FaceExtractor", "Looking at camera"),
+        ("passenger_interaction", "FaceExtractor", "Passengers facing each other"),
+        ("gesture_vsign", "GestureExtractor", "V-sign gesture"),
+        ("gesture_thumbsup", "GestureExtractor", "Thumbs up gesture"),
     ]
 
     for trigger, source, desc in triggers:
@@ -200,3 +205,87 @@ def _print_device_info():
         print(f"  ONNX Runtime: {', '.join(providers)}")
     except ImportError:
         print("  ONNX Runtime: Not installed")
+
+
+def _print_dependency_graph():
+    """Print extractor dependency graph."""
+    print("FaceMoment - Extractor Dependency Graph")
+    print("=" * 60)
+
+    # Define extractors with their dependencies
+    extractors = [
+        ("face_detect", [], "Face detection (bbox, head pose)"),
+        ("face_classifier", ["face_detect"], "Face role classification (main/passenger/transient)"),
+        ("expression", ["face_detect"], "Expression analysis (emotions)"),
+        ("face", [], "Face composite (detect + expression)"),
+        ("pose", [], "Pose estimation (keypoints)"),
+        ("gesture", [], "Gesture detection (hand signs)"),
+        ("quality", [], "Quality metrics (blur, brightness)"),
+        ("dummy", [], "Dummy extractor (testing)"),
+    ]
+
+    # Build dependency graph
+    print("\n[Dependency Tree]")
+    print("-" * 60)
+
+    # Group by root (no dependencies)
+    roots = [(name, deps, desc) for name, deps, desc in extractors if not deps]
+    dependents = [(name, deps, desc) for name, deps, desc in extractors if deps]
+
+    for name, deps, desc in roots:
+        print(f"  {name}")
+        print(f"  │   {desc}")
+        # Find children
+        children = [(n, d, ds) for n, d, ds in dependents if name in d]
+        for i, (child_name, child_deps, child_desc) in enumerate(children):
+            is_last = i == len(children) - 1
+            prefix = "└──" if is_last else "├──"
+            print(f"  {prefix} {child_name}")
+            print(f"  {'    ' if is_last else '│   '}   {child_desc}")
+        print()
+
+    # Execution order recommendation
+    print("[Recommended Execution Order]")
+    print("-" * 60)
+    print("  For face analysis pipeline:")
+    print("    1. face_detect     → 2. face_classifier → 3. expression → 4. fusion")
+    print()
+    print("  For full analysis pipeline:")
+    print("    1. quality         (gate check)")
+    print("    2. face_detect     (detection)")
+    print("    3. face_classifier (depends on face_detect)")
+    print("    4. expression      (depends on face_detect)")
+    print("    5. pose            (independent)")
+    print("    6. gesture         (independent)")
+    print("    7. fusion          (combines all)")
+    print()
+
+    # Visualize as ASCII graph
+    print("[ASCII Graph]")
+    print("-" * 60)
+    print("""
+  ┌─────────────┐
+  │   quality   │ (no deps)
+  └──────┬──────┘
+         │
+  ┌──────┴──────┐
+  │ face_detect │ (no deps)
+  └──────┬──────┘
+         │
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+  ┌──────────────┐  ┌─────────────┐
+  │  classifier  │  │ expression  │  depends: [face_detect]
+  │ (main/pass)  │  │ (emotions)  │
+  └──────┬───────┘  └──────┬──────┘
+         │                 │
+         └────────┬────────┘
+                  │
+  ┌───────────────┼───────────────┐
+  │               │               │
+  ▼               ▼               ▼
+┌──────┐     ┌─────────┐     ┌─────────┐
+│ pose │     │ gesture │     │ fusion  │
+└──────┘     └─────────┘     └─────────┘
+""")

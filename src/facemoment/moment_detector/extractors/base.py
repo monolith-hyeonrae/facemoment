@@ -1,34 +1,18 @@
-"""Base extractor interface for feature extraction (B modules)."""
+"""Base extractor interface for feature extraction (B modules).
 
-from abc import ABC, abstractmethod
+This module re-exports the base classes from visualpath and provides
+facemoment-specific observation types.
+"""
+
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 
-from visualbase import Frame
+# Re-export BaseExtractor from visualpath
+from visualpath.core.extractor import BaseExtractor
+from visualpath.core.isolation import IsolationLevel
 
-
-@dataclass
-class Observation:
-    """Observation output from an extractor.
-
-    Observations are timestamped feature extractions that flow from
-    B modules (extractors) to C module (fusion).
-
-    Attributes:
-        source: Name of the extractor that produced this observation.
-        frame_id: Frame identifier from the source video.
-        t_ns: Timestamp in nanoseconds (source timeline).
-        signals: Dictionary of extracted signals/features.
-        faces: Optional list of face observations.
-    """
-
-    source: str
-    frame_id: int
-    t_ns: int
-    signals: Dict[str, float] = field(default_factory=dict)
-    faces: List["FaceObservation"] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    timing: Optional[Dict[str, float]] = None  # {"detect_ms": 42.3, "expression_ms": 28.1}
+# Re-export for backward compatibility
+from visualbase import Frame  # noqa: F401
 
 
 @dataclass
@@ -62,68 +46,40 @@ class FaceObservation:
     signals: Dict[str, float] = field(default_factory=dict)
 
 
-class BaseExtractor(ABC):
-    """Abstract base class for feature extractors (B modules).
+@dataclass
+class Observation:
+    """Observation output from an extractor.
 
-    Extractors analyze frames and produce observations containing
-    extracted features. Multiple extractors can run in parallel,
-    each focusing on different aspects (face, gesture, quality, etc.).
+    Observations are timestamped feature extractions that flow from
+    B modules (extractors) to C module (fusion).
 
-    Example:
-        >>> class FaceExtractor(BaseExtractor):
-        ...     @property
-        ...     def name(self) -> str:
-        ...         return "face"
-        ...
-        ...     def extract(self, frame: Frame) -> Optional[Observation]:
-        ...         # Detect faces and extract features
-        ...         faces = self._detect_faces(frame.data)
-        ...         return Observation(
-        ...             source=self.name,
-        ...             frame_id=frame.frame_id,
-        ...             t_ns=frame.t_src_ns,
-        ...             faces=faces,
-        ...         )
+    This is a facemoment-specific Observation that includes face-specific
+    fields. It is compatible with visualpath's generic Observation interface.
+
+    Attributes:
+        source: Name of the extractor that produced this observation.
+        frame_id: Frame identifier from the source video.
+        t_ns: Timestamp in nanoseconds (source timeline).
+        signals: Dictionary of extracted signals/features.
+        data: Type-safe output data (e.g., PoseOutput, FaceClassifierOutput).
+        faces: Optional list of face observations.
+        metadata: Additional metadata about the observation.
+        timing: Optional per-component timing in milliseconds.
     """
 
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Unique name identifying this extractor."""
-        ...
+    source: str
+    frame_id: int
+    t_ns: int
+    signals: Dict[str, float] = field(default_factory=dict)
+    data: Optional[Any] = None  # Type-safe output (PoseOutput, FaceDetectOutput, etc.)
+    faces: List[FaceObservation] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    timing: Optional[Dict[str, float]] = None  # {"detect_ms": 42.3, "expression_ms": 28.1}
 
-    @abstractmethod
-    def extract(self, frame: Frame) -> Optional[Observation]:
-        """Extract features from a frame.
 
-        Args:
-            frame: Input frame to analyze.
-
-        Returns:
-            Observation containing extracted features, or None if
-            no meaningful observation could be made.
-        """
-        ...
-
-    def initialize(self) -> None:
-        """Initialize extractor resources (models, etc.).
-
-        Override this method to load models or initialize resources.
-        Called once before processing begins.
-        """
-        pass
-
-    def cleanup(self) -> None:
-        """Clean up extractor resources.
-
-        Override this method to release resources.
-        Called when processing ends.
-        """
-        pass
-
-    def __enter__(self) -> "BaseExtractor":
-        self.initialize()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.cleanup()
+__all__ = [
+    "BaseExtractor",
+    "Observation",
+    "FaceObservation",
+    "IsolationLevel",
+]

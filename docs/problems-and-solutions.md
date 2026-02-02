@@ -12,7 +12,7 @@ FaceMoment에서 하이라이트 순간을 감지하기 위해 사용하는 알�
 6. [연속 프레임 확인](#6-연속-프레임-확인)
 7. [쿨다운 기간](#7-쿨다운-기간)
 
-> **타이밍/동기화 문제**는 [stream-synchronization.md](stream-synchronization.md)를 참조하세요.
+> **타이밍/동기화 문제**는 [visualpath/docs/stream-synchronization.md](../../visualpath/docs/stream-synchronization.md)를 참조하세요.
 
 ---
 
@@ -193,7 +193,7 @@ trigger = angular_velocity > threshold AND yaw가 0에 가까워지는 중
 
 ### 문제
 
-고카트 시나리오에서 피사체가 카메라를 직접 바라볼 때를 감지합니다. 인식과 참여를 나타냅니다.
+GR차량 시나리오에서 피사체가 카메라를 직접 바라볼 때를 감지합니다. 인식과 참여를 나타냅니다.
 
 ```
                     Pitch
@@ -243,7 +243,7 @@ trigger = gaze_score > score_threshold
 
 ### 문제
 
-2인 고카트 시나리오에서 동승자들이 서로를 바라볼 때를 감지합니다.
+2인 GR차량 시나리오에서 동승자들이 서로를 바라볼 때를 감지합니다.
 
 ```
     ┌─────────────────────────────────────────────────┐
@@ -386,7 +386,7 @@ if last_trigger_time is not None:
 | `GateConditionRecord` | VERBOSE | 프레임별 게이트 조건 체크 |
 
 > 타이밍 관련 레코드 (`TimingRecord`, `FrameDropRecord`, `SyncDelayRecord`)는
-> [stream-synchronization.md](stream-synchronization.md#observability-연동)를 참조하세요.
+> [visualpath/docs/stream-synchronization.md](../../visualpath/docs/stream-synchronization.md#observability-연동)를 참조하세요.
 
 ### 예시: 표정 급변 민감도 분석
 
@@ -424,7 +424,7 @@ HighlightFusion(
     cooldown_sec=2.0,
     consecutive_frames=2,
 
-    # 고카트 전용
+    # GR차량 전용
     gaze_yaw_threshold=10.0,
     gaze_pitch_threshold=15.0,
     gaze_score_threshold=0.5,

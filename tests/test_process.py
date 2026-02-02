@@ -20,9 +20,12 @@ from facemoment.moment_detector.extractors.base import (
     FaceObservation,
 )
 from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
-from facemoment.process.extractor import ExtractorProcess
-from facemoment.process.fusion import FusionProcess
-from facemoment.process.orchestrator import ExtractorOrchestrator
+from facemoment.process import (
+    ExtractorProcess,
+    FusionProcess,
+    ExtractorOrchestrator,
+    FacemomentMapper,
+)
 
 
 class MockExtractor(BaseExtractor):
@@ -201,13 +204,9 @@ class TestExtractorProcess:
     """Tests for ExtractorProcess."""
 
     def test_observation_to_message_face(self):
-        """Test conversion of face observation to OBS message."""
+        """Test conversion of face observation to OBS message using FacemomentMapper."""
         extractor = MockExtractor(name="face")
-        process = ExtractorProcess(
-            extractor=extractor,
-            input_fifo="/tmp/test.fifo",
-            obs_socket="/tmp/test.sock",
-        )
+        mapper = FacemomentMapper()
 
         # Create a test frame
         data = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -217,8 +216,8 @@ class TestExtractorProcess:
         obs = extractor.extract(frame)
         assert obs is not None
 
-        # Convert to message
-        msg = process._observation_to_message(obs)
+        # Convert to message using mapper
+        msg = mapper.to_message(obs)
         assert msg is not None
         assert msg.startswith("OBS src=face")
         assert "frame=1" in msg
@@ -232,38 +231,30 @@ class TestExtractorProcess:
         assert parsed.faces[0].expr == pytest.approx(0.8, rel=1e-2)
 
     def test_observation_to_message_pose(self):
-        """Test conversion of pose observation to OBS message."""
+        """Test conversion of pose observation to OBS message using FacemomentMapper."""
         extractor = MockExtractor(name="pose")
-        process = ExtractorProcess(
-            extractor=extractor,
-            input_fifo="/tmp/test.fifo",
-            obs_socket="/tmp/test.sock",
-        )
+        mapper = FacemomentMapper()
 
         data = np.zeros((480, 640, 3), dtype=np.uint8)
         frame = Frame.from_array(data, frame_id=1, t_src_ns=1_000_000_000)
 
         obs = extractor.extract(frame)
-        msg = process._observation_to_message(obs)
+        msg = mapper.to_message(obs)
 
         assert msg is not None
         assert msg.startswith("OBS src=pose")
         assert "poses=1" in msg
 
     def test_observation_to_message_quality(self):
-        """Test conversion of quality observation to OBS message."""
+        """Test conversion of quality observation to OBS message using FacemomentMapper."""
         extractor = MockExtractor(name="quality")
-        process = ExtractorProcess(
-            extractor=extractor,
-            input_fifo="/tmp/test.fifo",
-            obs_socket="/tmp/test.sock",
-        )
+        mapper = FacemomentMapper()
 
         data = np.zeros((480, 640, 3), dtype=np.uint8)
         frame = Frame.from_array(data, frame_id=1, t_src_ns=1_000_000_000)
 
         obs = extractor.extract(frame)
-        msg = process._observation_to_message(obs)
+        msg = mapper.to_message(obs)
 
         assert msg is not None
         assert msg.startswith("OBS src=quality")
@@ -305,6 +296,7 @@ class TestExtractorProcess:
     def test_interface_process_frames(self):
         """Test frame processing with interface-based dependencies."""
         extractor = MockExtractor(name="face")
+        mapper = FacemomentMapper()
 
         # Create test frames
         data = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -318,6 +310,7 @@ class TestExtractorProcess:
 
         process = ExtractorProcess(
             extractor=extractor,
+            observation_mapper=mapper,
             video_reader=reader,
             message_sender=sender,
             reconnect=False,  # Don't reconnect after frames are exhausted
@@ -370,27 +363,23 @@ class TestFusionProcess:
     """Tests for FusionProcess."""
 
     def test_obs_to_observation_face(self):
-        """Test conversion of OBS message to Observation."""
-        fusion = MockFusion()
-        process = FusionProcess(
-            fusion=fusion,
-            obs_socket="/tmp/obs.sock",
-            trig_socket="/tmp/trig.sock",
-        )
+        """Test conversion of OBS message to Observation using FacemomentMapper."""
+        from facemoment.process import FaceObservationMapper
+        mapper = FaceObservationMapper()
 
-        # Create mock OBS message
-        from visualbase.ipc.messages import OBSMessage, FaceData
-        obs_msg = OBSMessage(
-            src="face",
+        # Create FaceOBS message string
+        from visualbase.ipc.messages import FaceOBS, FaceData
+        face_obs = FaceOBS(
             frame_id=1,
             t_ns=1_000_000_000,
             faces=[
                 FaceData(id=0, conf=0.95, x=0.1, y=0.2, w=0.3, h=0.4, expr=0.8),
             ],
         )
+        msg = face_obs.to_message()
 
-        # Convert to Observation
-        obs = process._obs_to_observation(obs_msg)
+        # Convert to Observation using mapper
+        obs = mapper.from_message(msg)
 
         assert obs is not None
         assert obs.source == "face"
@@ -399,25 +388,21 @@ class TestFusionProcess:
         assert obs.faces[0].expression == 0.8
 
     def test_obs_to_observation_pose(self):
-        """Test conversion of pose OBS message to Observation."""
-        fusion = MockFusion()
-        process = FusionProcess(
-            fusion=fusion,
-            obs_socket="/tmp/obs.sock",
-            trig_socket="/tmp/trig.sock",
-        )
+        """Test conversion of pose OBS message to Observation using FacemomentMapper."""
+        from facemoment.process import PoseObservationMapper
+        mapper = PoseObservationMapper()
 
-        from visualbase.ipc.messages import OBSMessage, PoseData
-        obs_msg = OBSMessage(
-            src="pose",
+        from visualbase.ipc.messages import PoseOBS, PoseData
+        pose_obs = PoseOBS(
             frame_id=1,
             t_ns=1_000_000_000,
             poses=[
                 PoseData(id=0, conf=0.9, hand_raised=True, hand_wave=False),
             ],
         )
+        msg = pose_obs.to_message()
 
-        obs = process._obs_to_observation(obs_msg)
+        obs = mapper.from_message(msg)
 
         assert obs is not None
         assert obs.source == "pose"
@@ -425,23 +410,19 @@ class TestFusionProcess:
         assert obs.signals.get("hand_wave") == 0.0
 
     def test_obs_to_observation_quality(self):
-        """Test conversion of quality OBS message to Observation."""
-        fusion = MockFusion()
-        process = FusionProcess(
-            fusion=fusion,
-            obs_socket="/tmp/obs.sock",
-            trig_socket="/tmp/trig.sock",
-        )
+        """Test conversion of quality OBS message to Observation using FacemomentMapper."""
+        from facemoment.process import QualityObservationMapper
+        mapper = QualityObservationMapper()
 
-        from visualbase.ipc.messages import OBSMessage, QualityData
-        obs_msg = OBSMessage(
-            src="quality",
+        from visualbase.ipc.messages import QualityOBS, QualityData
+        quality_obs = QualityOBS(
             frame_id=1,
             t_ns=1_000_000_000,
             quality=QualityData(blur=100.0, brightness=128.0, contrast=0.5, gate_open=True),
         )
+        msg = quality_obs.to_message()
 
-        obs = process._obs_to_observation(obs_msg)
+        obs = mapper.from_message(msg)
 
         assert obs is not None
         assert obs.source == "quality"

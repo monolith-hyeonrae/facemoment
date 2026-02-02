@@ -5,6 +5,7 @@ description = "Face moment detection and highlight clip extraction for 981park"
 requires-python = ">=3.10"
 dependencies = [
     "visualbase",
+    "visualpath",
     "numpy>=1.24.0",
     "opencv-python>=4.8.0",
 ]
@@ -23,6 +24,7 @@ zmq = [
 # CLI/GUI visualization
 cli = [
     "pyqt6>=6.10.2",
+    "supervision>=0.19.0",
 ]
 
 # === Worker-specific dependencies (isolated venvs) ===
@@ -65,6 +67,18 @@ all = [
 [project.scripts]
 facemoment = "facemoment.cli:main"
 
+# Register extractors and fusions as plugins for visualpath
+[project.entry-points."visualpath.extractors"]
+face = "facemoment.moment_detector.extractors.face:FaceExtractor"
+pose = "facemoment.moment_detector.extractors.pose:PoseExtractor"
+gesture = "facemoment.moment_detector.extractors.gesture:GestureExtractor"
+quality = "facemoment.moment_detector.extractors.quality:QualityExtractor"
+dummy = "facemoment.moment_detector.extractors.dummy:DummyExtractor"
+
+[project.entry-points."visualpath.fusions"]
+highlight = "facemoment.moment_detector.fusion.highlight:HighlightFusion"
+dummy = "facemoment.moment_detector.fusion.dummy:DummyFusion"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -80,16 +94,9 @@ python_functions = ["test_*"]
 
 [tool.uv.sources]
 visualbase = { path = "../visualbase", editable = true }
+visualpath = { path = "../visualpath", editable = true }
 
-# Force opencv-python instead of opencv-python-headless (required by albumentations)
-# to keep GUI support (cv2.imshow)
-[tool.uv]
-constraint-dependencies = [
-    "opencv-python-headless<0",
-]
-
-# Replace onnxruntime (CPU) with onnxruntime-gpu for GPU acceleration
-# hsemotion-onnx requires onnxruntime, but we want GPU version
-override-dependencies = [
-    "onnxruntime>=1.16.0; extra != 'face' and extra != 'face-full'",
-]
+# NOTE: constraint/override dependencies removed!
+# With VenvWorker, each extractor runs in an isolated venv,
+# so dependency conflicts (opencv-python vs headless, onnxruntime vs gpu)
+# are no longer an issue. See visualpath.process.VenvWorker.

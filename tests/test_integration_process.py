@@ -22,9 +22,12 @@ from facemoment.moment_detector.extractors.base import (
     FaceObservation,
 )
 from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult, Trigger
-from facemoment.process.extractor import ExtractorProcess
-from facemoment.process.fusion import FusionProcess
-from facemoment.process.orchestrator import ExtractorOrchestrator
+from facemoment.process import (
+    ExtractorProcess,
+    FusionProcess,
+    ExtractorOrchestrator,
+    FacemomentMapper,
+)
 
 
 class MockVideoReader(VideoReader):
@@ -232,9 +235,11 @@ class TestExtractorProcessIntegration:
         reader = MockVideoReader(frames=frames)
         sender = MockMessageSender()
         extractor = MockExtractor(name="face")
+        mapper = FacemomentMapper()
 
         process = ExtractorProcess(
             extractor=extractor,
+            observation_mapper=mapper,
             video_reader=reader,
             message_sender=sender,
             reconnect=False,
@@ -269,9 +274,11 @@ class TestExtractorProcessIntegration:
             reader = MockVideoReader(frames=frames.copy())
             sender = MockMessageSender()
             extractor = MockExtractor(name=ext_type)
+            mapper = FacemomentMapper()
 
             process = ExtractorProcess(
                 extractor=extractor,
+                observation_mapper=mapper,
                 video_reader=reader,
                 message_sender=sender,
                 reconnect=False,
@@ -388,9 +395,11 @@ class TestEndToEndFlow:
         extractor = MockExtractor(name="face")
         reader = MockVideoReader(frames=[frame])
         sender = MockMessageSender()
+        mapper = FacemomentMapper()
 
         process = ExtractorProcess(
             extractor=extractor,
+            observation_mapper=mapper,
             video_reader=reader,
             message_sender=sender,
             reconnect=False,
