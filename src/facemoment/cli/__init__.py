@@ -98,8 +98,9 @@ Examples:
         help="Face analysis ROI in normalized coords (0-1). Default: 0.1,0.1,0.9,0.9 (center 80%%)"
     )
     debug_parser.add_argument(
-        "--backend", choices=["pathway", "simple"], default="pathway",
-        help="Execution backend: 'pathway' (streaming, default) or 'simple' (sequential)"
+        "--backend", choices=["pathway", "simple"], default=None,
+        help="Execution backend: 'pathway' (Pathway streaming) or 'simple' (sequential). "
+             "Default: inline (same extractors/fusion as pathway, smooth visualization)"
     )
     debug_parser.add_argument(
         "--report", type=str, metavar="PATH",

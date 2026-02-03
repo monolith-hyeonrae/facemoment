@@ -59,13 +59,14 @@ def run_debug(args):
             venv_gesture=venv_gesture,
         )
     else:
-        backend = getattr(args, 'backend', 'pathway')
+        backend = getattr(args, 'backend', None)
         use_ml = args.use_ml
 
-        if backend == "pathway" and use_ml is not False:
-            session = PathwayDebugSession(args, selected, show_window)
-        else:
+        if use_ml is False or backend == "simple":
             session = SimpleDebugSession(args, selected, show_window)
+        else:
+            # PathwayDebugSession: inline (default) or --backend pathway
+            session = PathwayDebugSession(args, selected, show_window)
 
     session.run()
 
@@ -303,15 +304,12 @@ class DebugSession:
 # ---------------------------------------------------------------------------
 
 class PathwayDebugSession(DebugSession):
-    """Debug session using Pathway pipeline with PathwayMonitor.
+    """Debug session using FacemomentPipeline with PathwayMonitor.
 
-    When PathwayBackend is available and no subprocess workers are needed,
-    uses actual Pathway engine in a 2-phase approach:
-      Phase 1: Process all frames through PathwayBackend (batch)
-      Phase 2: Replay results with visualization (interactive)
-
-    Falls back to inline processing when Pathway is unavailable or
-    subprocess workers are active (CUDA conflict isolation).
+    Default: inline processing (smooth frame-by-frame visualization).
+    With --backend pathway: uses actual Pathway streaming engine via
+    on_frame_result callback. Pathway batches frames which can cause
+    stuttering in the visualization, but uses the real streaming pipeline.
     """
 
     def __init__(self, args, selected, show_window):
@@ -320,6 +318,7 @@ class PathwayDebugSession(DebugSession):
         self.pipeline = None
         self.monitor = None
         self._use_pathway = False
+        self._force_pathway = getattr(args, 'backend', None) == 'pathway'
 
     def _setup_pipeline(self):
         from facemoment.pipeline.pathway_pipeline import FacemomentPipeline, PATHWAY_AVAILABLE
@@ -346,17 +345,24 @@ class PathwayDebugSession(DebugSession):
         self.pipeline.initialize()
 
         # Detect actual backend
-        if not PATHWAY_AVAILABLE:
-            self._use_pathway = False
-            self.backend_label = "INLINE (pathway unavailable)"
-            print("WARNING: Pathway backend not available — running inline execution")
-        elif self.pipeline.workers:
-            self._use_pathway = False
-            self.backend_label = "INLINE (subprocess workers active)"
-            print("WARNING: ProcessWorkers active — Pathway cannot manage subprocesses, running inline execution")
+        # Default: inline (smooth frame-by-frame visualization)
+        # --backend pathway: force Pathway streaming engine
+        if self._force_pathway:
+            if not PATHWAY_AVAILABLE:
+                self._use_pathway = False
+                self.backend_label = "INLINE (pathway unavailable)"
+                print("WARNING: Pathway not available — falling back to inline")
+            elif self.pipeline.workers:
+                self._use_pathway = False
+                self.backend_label = "INLINE (subprocess workers active)"
+                print("WARNING: ProcessWorkers active — falling back to inline")
+            else:
+                self._use_pathway = True
+                self.backend_label = "PATHWAY"
         else:
-            self._use_pathway = True
-            self.backend_label = "PATHWAY"
+            # Default: inline for smooth debug visualization
+            self._use_pathway = False
+            self.backend_label = "PATHWAY (inline)"
 
         # Print extractor status
         initialized_names = {ext.name for ext in self.pipeline.extractors}
