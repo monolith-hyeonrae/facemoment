@@ -43,6 +43,9 @@ from facemoment.observability.sinks import (
     NullSink,
 )
 
+# Re-export PathwayMonitor
+from facemoment.observability.pathway_monitor import PathwayMonitor
+
 __all__ = [
     # Core (from visualpath)
     "TraceLevel",
@@ -55,4 +58,6 @@ __all__ = [
     "ConsoleSink",
     "MemorySink",
     "NullSink",
+    # Monitoring
+    "PathwayMonitor",
 ]

@@ -11,57 +11,51 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Development
-dev = [
-    "pytest>=7.0.0",
-]
+# === Worker dependencies (isolated venvs) ===
+# Each worker runs in its own venv with minimal dependencies.
+# See: visualpath.process.VenvWorker
+#
+# Fine-grained extras for venv isolation (Phase 15 분리 extractor):
+#   venv-face-detect:  uv pip install -e ".[face-detect]"   → onnxruntime-gpu
+#   venv-expression:   uv pip install -e ".[expression]"    → onnxruntime (CPU)
+#   venv-face (legacy): uv pip install -e ".[face]"         → 둘 다 포함
+#
+# face_detect 결과는 deps로 expression venv에 ZMQ 전달되므로
+# expression venv에 insightface/onnxruntime-gpu가 필요 없습니다.
 
-# IPC for distributed workers
-zmq = [
-    "pyzmq>=25.0.0",
-]
-
-# CLI/GUI visualization
-cli = [
-    "pyqt6>=6.10.2",
-    "supervision>=0.19.0",
-]
-
-# === Worker-specific dependencies (isolated venvs) ===
-
-# Face detection + expression analysis
-face = [
+face-detect = [
     "insightface>=0.7.3",
     "onnxruntime-gpu>=1.16.0",
+    "ml-dtypes>=0.5.0",
+]
+expression = [
     "hsemotion-onnx>=0.3",
-    "ml-dtypes>=0.5.0",
 ]
+# face-classifier: base 의존성만으로 충분 (순수 Python 로직)
 
-# Face with PyFeat (slower but more accurate expression)
-face-full = [
-    "insightface>=0.7.3",
-    "onnxruntime-gpu>=1.16.0",
-    "py-feat>=0.6.0",
-    "pandas>=2.0.0,<3",
-    "scipy>=1.10.0",
-    "ml-dtypes>=0.5.0",
+# Legacy composite extra (face-detect + expression in one venv)
+face = [
+    "facemoment[face-detect,expression]",
 ]
-
-# Pose estimation
 pose = [
     "ultralytics>=8.0.0",
 ]
-
-# Hand gesture detection
 gesture = [
     "mediapipe>=0.10.32",
 ]
 
-# === Convenience bundles ===
+# === Local development ===
+# For running everything in a single environment (may have conflicts!)
 
-# All ML backends (for development/testing - may have conflicts!)
-all = [
-    "facemoment[face,pose,gesture,cli]",
+local = [
+    "facemoment[face,pose,gesture]",
+    "pyzmq>=25.0.0",
+    "pyqt6>=6.10.2",
+    "supervision>=0.19.0",
+    "pathway>=0.8.0",
+]
+dev = [
+    "pytest>=7.0.0",
 ]
 
 [project.scripts]
@@ -70,6 +64,9 @@ facemoment = "facemoment.cli:main"
 # Register extractors and fusions as plugins for visualpath
 [project.entry-points."visualpath.extractors"]
 face = "facemoment.moment_detector.extractors.face:FaceExtractor"
+face_detect = "facemoment.moment_detector.extractors.face_detect:FaceDetectionExtractor"
+expression = "facemoment.moment_detector.extractors.expression:ExpressionExtractor"
+face_classifier = "facemoment.moment_detector.extractors.face_classifier:FaceClassifierExtractor"
 pose = "facemoment.moment_detector.extractors.pose:PoseExtractor"
 gesture = "facemoment.moment_detector.extractors.gesture:GestureExtractor"
 quality = "facemoment.moment_detector.extractors.quality:QualityExtractor"
@@ -96,7 +93,17 @@ python_functions = ["test_*"]
 visualbase = { path = "../visualbase", editable = true }
 visualpath = { path = "../visualpath", editable = true }
 
-# NOTE: constraint/override dependencies removed!
-# With VenvWorker, each extractor runs in an isolated venv,
-# so dependency conflicts (opencv-python vs headless, onnxruntime vs gpu)
-# are no longer an issue. See visualpath.process.VenvWorker.
+# CRITICAL: hsemotion-onnx depends on "onnxruntime" (CPU-only wheel).
+# When both onnxruntime and onnxruntime-gpu are installed, the CPU package
+# overwrites the GPU pybind11 .so, silently disabling CUDAExecutionProvider.
+#
+# Fix: block the onnxruntime (CPU) package entirely via impossible marker.
+# onnxruntime-gpu provides the identical "onnxruntime" Python module with
+# CUDA/TensorRT providers, so hsemotion-onnx works fine at runtime.
+#
+# In production VenvWorker isolates each extractor, but for local
+# development (--extra local) this override is essential.
+#[tool.uv]
+#override-dependencies = [
+#    "onnxruntime ; sys_platform == 'never'",
+#]

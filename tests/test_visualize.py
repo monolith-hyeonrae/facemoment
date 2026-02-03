@@ -172,7 +172,11 @@ class TestDebugVisualizer:
         result = visualizer.create_debug_view(sample_frame)
 
         assert result is not None
-        assert result.shape == sample_frame.data.shape
+        # Canvas is larger than video: video + side panel + bottom panel
+        vh, vw = sample_frame.data.shape[:2]
+        assert result.shape[0] > vh  # includes bottom panel
+        assert result.shape[1] > vw  # includes side panel
+        assert result.shape[2] == 3
 
     def test_create_debug_view_with_roi(self, visualizer, sample_frame):
         """Test creating debug view with ROI."""
@@ -180,7 +184,10 @@ class TestDebugVisualizer:
         result = visualizer.create_debug_view(sample_frame, roi=roi)
 
         assert result is not None
-        assert result.shape == sample_frame.data.shape
+        vh, vw = sample_frame.data.shape[:2]
+        assert result.shape[0] > vh
+        assert result.shape[1] > vw
+        assert result.shape[2] == 3
 
     def test_reset(self, visualizer):
         """Test reset method."""

@@ -101,6 +101,7 @@ class PipelineConfig:
         fusion: Fusion module configuration.
         clip_output_dir: Directory for extracted clips.
         fps: Analysis frame rate.
+        backend: Execution backend ("pathway" or "simple"). Default: "pathway".
 
     Example:
         >>> config = PipelineConfig(
@@ -111,6 +112,7 @@ class PipelineConfig:
         ...     fusion=FusionConfig(cooldown_sec=2.0),
         ...     clip_output_dir="./clips",
         ...     fps=10,
+        ...     backend="pathway",
         ... )
     """
 
@@ -118,6 +120,7 @@ class PipelineConfig:
     fusion: FusionConfig = field(default_factory=FusionConfig)
     clip_output_dir: str = "./clips"
     fps: int = 10
+    backend: str = "pathway"  # "pathway" or "simple"
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PipelineConfig":
@@ -161,6 +164,7 @@ class PipelineConfig:
             fusion=fusion,
             clip_output_dir=data.get("clip_output_dir", data.get("output", {}).get("clip_dir", "./clips")),
             fps=data.get("fps", data.get("output", {}).get("fps", 10)),
+            backend=data.get("backend", "pathway"),
         )
 
     @classmethod
@@ -213,6 +217,7 @@ class PipelineConfig:
             },
             "clip_output_dir": self.clip_output_dir,
             "fps": self.fps,
+            "backend": self.backend,
         }
 
 
@@ -223,6 +228,7 @@ def create_default_config(
     clip_output_dir: str = "./clips",
     fps: int = 10,
     cooldown_sec: float = 2.0,
+    backend: str = "pathway",
 ) -> PipelineConfig:
     """Create a default pipeline configuration.
 
@@ -278,4 +284,5 @@ def create_default_config(
         fusion=FusionConfig(cooldown_sec=cooldown_sec),
         clip_output_dir=clip_output_dir,
         fps=fps,
+        backend=backend,
     )

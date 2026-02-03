@@ -97,6 +97,14 @@ Examples:
         "--roi", type=str, metavar="X1,Y1,X2,Y2",
         help="Face analysis ROI in normalized coords (0-1). Default: 0.1,0.1,0.9,0.9 (center 80%%)"
     )
+    debug_parser.add_argument(
+        "--backend", choices=["pathway", "simple"], default="pathway",
+        help="Execution backend: 'pathway' (streaming, default) or 'simple' (sequential)"
+    )
+    debug_parser.add_argument(
+        "--report", type=str, metavar="PATH",
+        help="Generate HTML debug report after session (e.g. --report report.html)"
+    )
 
     # process command
     proc_parser = subparsers.add_parser("process", help="Process video and extract highlight clips")
@@ -110,6 +118,10 @@ Examples:
     proc_parser.add_argument("--head-turn-threshold", type=float, default=30.0)
     proc_parser.add_argument("--trace", choices=["off", "minimal", "normal", "verbose"], default="off")
     proc_parser.add_argument("--trace-output", type=str)
+    proc_parser.add_argument(
+        "--backend", choices=["pathway", "simple"], default="pathway",
+        help="Execution backend: 'pathway' (streaming, default) or 'simple' (sequential)"
+    )
     # Distributed mode options
     proc_parser.add_argument(
         "--distributed", action="store_true",

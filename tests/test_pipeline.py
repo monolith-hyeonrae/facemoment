@@ -303,11 +303,13 @@ class TestPipelineOrchestratorIntegration:
     def test_run_with_dummy_extractor(self, test_video, output_dir):
         """Test running pipeline with dummy extractor in inline mode."""
         # Use dummy extractor which is always available
+        # Use backend="simple" to test worker-based callbacks
         config = PipelineConfig(
             extractors=[ExtractorConfig(name="dummy")],
             fusion=FusionConfig(cooldown_sec=1.0),
             clip_output_dir=str(output_dir),
             fps=10,
+            backend="simple",  # Use simple backend to test callbacks
         )
 
         orchestrator = PipelineOrchestrator.from_config(config)

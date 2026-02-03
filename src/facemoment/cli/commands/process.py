@@ -17,24 +17,26 @@ def run_process(args):
     venv_face = getattr(args, 'venv_face', None)
     venv_pose = getattr(args, 'venv_pose', None)
     venv_gesture = getattr(args, 'venv_gesture', None)
+    backend = getattr(args, 'backend', 'pathway')
 
     # If any venv path is provided, enable distributed mode
     if venv_face or venv_pose or venv_gesture or config_path:
         distributed = True
 
     if distributed:
-        _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture)
+        _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture, backend)
     else:
-        _run_library(args)
+        _run_library(args, backend)
 
 
-def _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture):
+def _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture, backend="pathway"):
     """Run processing in distributed mode using PipelineOrchestrator."""
     from facemoment.pipeline import (
         PipelineOrchestrator,
         PipelineConfig,
         create_default_config,
     )
+    from facemoment.pipeline.pathway_pipeline import PATHWAY_AVAILABLE
 
     # Setup observability
     trace_level = getattr(args, 'trace', 'off')
@@ -43,10 +45,14 @@ def _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture):
 
     output_dir = Path(args.output_dir)
 
+    # Determine effective backend
+    effective_backend = backend if PATHWAY_AVAILABLE or backend == "simple" else "simple"
+
     print(f"Processing: {args.path}")
     print(f"FPS: {args.fps}")
     print(f"Output: {output_dir}")
     print(f"Mode: DISTRIBUTED")
+    print(f"Backend: {effective_backend}" + (" (pathway unavailable, using simple)" if backend == "pathway" and not PATHWAY_AVAILABLE else ""))
     print("-" * 50)
 
     # Load or create config
@@ -65,6 +71,7 @@ def _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture):
             clip_output_dir=str(output_dir),
             fps=args.fps,
             cooldown_sec=args.cooldown,
+            backend=effective_backend,
         )
 
     # Print extractor configuration
@@ -217,11 +224,12 @@ def _run_distributed(args, config_path, venv_face, venv_pose, venv_gesture):
     cleanup_observability(hub, file_sink)
 
 
-def _run_library(args):
+def _run_library(args, backend="pathway"):
     """Run processing in library mode (original implementation)."""
     from facemoment import MomentDetector
     from facemoment.moment_detector.extractors import DummyExtractor, QualityExtractor
     from facemoment.moment_detector.fusion import DummyFusion
+    from facemoment.pipeline.pathway_pipeline import PATHWAY_AVAILABLE
 
     # Setup observability
     trace_level = getattr(args, 'trace', 'off')
@@ -237,10 +245,14 @@ def _run_library(args):
     use_ml = args.use_ml
     ml_mode = "auto" if use_ml is None else ("enabled" if use_ml else "disabled")
 
+    # Determine effective backend
+    effective_backend = backend if PATHWAY_AVAILABLE or backend == "simple" else "simple"
+
     print(f"Processing: {args.path}")
     print(f"FPS: {args.fps}")
     print(f"Output: {output_dir}")
     print(f"Mode: LIBRARY")
+    print(f"Backend: {effective_backend}" + (" (pathway unavailable, using simple)" if backend == "pathway" and not PATHWAY_AVAILABLE else ""))
     print(f"ML backends: {ml_mode}")
     print("-" * 50)
 

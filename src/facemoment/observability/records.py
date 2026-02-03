@@ -10,7 +10,7 @@ Record Categories:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 # Import and re-export base types from visualpath
 from visualpath.observability import TraceLevel
@@ -217,6 +217,105 @@ class TriggerFireRecord(TraceRecord):
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+# =============================================================================
+# Pathway Pipeline Monitoring Records
+# =============================================================================
+
+
+@dataclass
+class PathwayFrameRecord(TraceRecord):
+    """Per-frame pipeline summary for Pathway backend.
+
+    Emitted at NORMAL level for each frame processed through the
+    Pathway pipeline, summarizing extractor timings and fusion result.
+    """
+    record_type: str = field(default="pathway_frame", init=False)
+
+    frame_id: int = 0
+    t_ns: int = 0
+    extractor_timings_ms: Dict[str, float] = field(default_factory=dict)
+    total_frame_ms: float = 0.0
+    observations_produced: List[str] = field(default_factory=list)
+    observations_failed: List[str] = field(default_factory=list)
+    fusion_ms: float = 0.0
+    fusion_decision: str = ""  # "triggered"/"no_trigger"/"cooldown"/"gate_closed"
+
+
+@dataclass
+class ExtractorTimingRecord(TraceRecord):
+    """Individual extractor timing with sub-component breakdown.
+
+    Emitted at NORMAL level for each extractor on each frame.
+    """
+    record_type: str = field(default="extractor_timing", init=False)
+
+    frame_id: int = 0
+    extractor_name: str = ""
+    processing_ms: float = 0.0
+    produced_observation: bool = False
+    sub_timings_ms: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class ObservationMergeRecord(TraceRecord):
+    """Detailed observation merge information.
+
+    Emitted at VERBOSE level when observations from multiple extractors
+    are merged for fusion input.
+    """
+    record_type: str = field(default="observation_merge", init=False)
+    min_level: TraceLevel = field(default=TraceLevel.VERBOSE, repr=False)
+
+    frame_id: int = 0
+    input_sources: List[str] = field(default_factory=list)
+    input_signal_counts: Dict[str, int] = field(default_factory=dict)
+    merged_signal_keys: List[str] = field(default_factory=list)
+    main_face_id: Optional[int] = None
+    main_face_source: str = ""  # "classifier_obs"/"merged_signals"/"none"
+
+
+@dataclass
+class BackpressureRecord(TraceRecord):
+    """Rolling performance statistics emitted periodically.
+
+    Emitted at NORMAL level every N frames (default 50) with
+    aggregated timing statistics for bottleneck analysis.
+    """
+    record_type: str = field(default="backpressure", init=False)
+
+    start_frame: int = 0
+    end_frame: int = 0
+    frame_count: int = 0
+    wall_time_sec: float = 0.0
+    effective_fps: float = 0.0
+    target_fps: float = 0.0
+    fps_ratio: float = 0.0
+    extractor_avg_ms: Dict[str, float] = field(default_factory=dict)
+    extractor_max_ms: Dict[str, float] = field(default_factory=dict)
+    extractor_p95_ms: Dict[str, float] = field(default_factory=dict)
+    slowest_extractor: str = ""
+    bottleneck_pct: float = 0.0
+    fusion_avg_ms: float = 0.0
+
+
+@dataclass
+class PipelineStatsRecord(TraceRecord):
+    """Session-level pipeline summary emitted at session end.
+
+    Emitted at MINIMAL level with overall statistics.
+    """
+    record_type: str = field(default="pipeline_stats", init=False)
+    min_level: TraceLevel = field(default=TraceLevel.MINIMAL, repr=False)
+
+    total_frames: int = 0
+    total_triggers: int = 0
+    wall_time_sec: float = 0.0
+    effective_fps: float = 0.0
+    extractor_stats: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    fusion_avg_ms: float = 0.0
+    gate_open_pct: float = 0.0
+
+
 __all__ = [
     # Re-exported from visualpath
     "TraceRecord",
@@ -234,4 +333,10 @@ __all__ = [
     "TriggerCandidate",
     "TriggerDecisionRecord",
     "TriggerFireRecord",
+    # Pathway monitoring
+    "PathwayFrameRecord",
+    "ExtractorTimingRecord",
+    "ObservationMergeRecord",
+    "BackpressureRecord",
+    "PipelineStatsRecord",
 ]

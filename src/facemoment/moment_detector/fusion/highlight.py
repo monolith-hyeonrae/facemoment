@@ -241,8 +241,8 @@ class HighlightFusion(BaseFusion):
         self._observation_count += 1
         t_ns = observation.t_ns
 
-        # Update main face ID from classifier (Phase 16)
-        self._update_main_face_id(classifier_obs)
+        # Update main face ID from classifier or merged signals (Phase 16/17)
+        self._update_main_face_id(classifier_obs, observation)
 
         # 1. Check cooldown
         if self._in_cooldown(t_ns):
@@ -885,18 +885,33 @@ class HighlightFusion(BaseFusion):
             return False
         return (t_ns - self._last_trigger_ns) < self._cooldown_ns
 
-    def _update_main_face_id(self, classifier_obs: Optional[Observation]) -> None:
-        """Update main face ID from classifier observation.
+    def _update_main_face_id(
+        self,
+        classifier_obs: Optional[Observation],
+        observation: Optional[Observation] = None,
+    ) -> None:
+        """Update main face ID from classifier observation or merged signals.
+
+        Supports two modes:
+        1. Explicit classifier_obs parameter (Phase 16)
+        2. Merged observation with main_face_id in signals (Phase 17 Pathway)
 
         Args:
             classifier_obs: Face classifier observation.
+            observation: Main observation (may contain main_face_id in signals).
         """
-        if classifier_obs is None or classifier_obs.data is None:
-            return
+        # First, try explicit classifier observation
+        if classifier_obs is not None and classifier_obs.data is not None:
+            data = classifier_obs.data
+            if hasattr(data, 'main_face') and data.main_face is not None:
+                self._main_face_id = data.main_face.face.face_id
+                return
 
-        data = classifier_obs.data
-        if hasattr(data, 'main_face') and data.main_face is not None:
-            self._main_face_id = data.main_face.face.face_id
+        # Second, try merged observation signals (Pathway mode)
+        if observation is not None and self._main_only:
+            main_face_id = observation.signals.get("main_face_id")
+            if main_face_id is not None:
+                self._main_face_id = main_face_id
 
     def _get_target_faces(self, observation: Observation) -> List[FaceObservation]:
         """Get faces to analyze based on main-only mode.

@@ -18,6 +18,7 @@ from facemoment.main import (
     # Configuration
     DEFAULT_FPS,
     DEFAULT_COOLDOWN,
+    DEFAULT_BACKEND,
     EXTRACTORS,
     FUSIONS,
     # Result type
@@ -33,6 +34,7 @@ __all__ = [
     # Configuration
     "DEFAULT_FPS",
     "DEFAULT_COOLDOWN",
+    "DEFAULT_BACKEND",
     "EXTRACTORS",
     "FUSIONS",
     # High-level API

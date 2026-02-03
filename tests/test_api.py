@@ -20,10 +20,11 @@ class TestRunFunction:
         """Test run returns Result."""
         import facemoment as fm
 
+        # Use backend="simple" to test MomentDetector code path
         with patch.object(fm.MomentDetector, "process_file") as mock_process:
             mock_process.return_value = []
 
-            result = fm.run("fake_video.mp4", extractors=["dummy"])
+            result = fm.run("fake_video.mp4", extractors=["dummy"], backend="simple")
 
             assert isinstance(result, fm.Result)
             assert hasattr(result, "triggers")
@@ -35,11 +36,12 @@ class TestRunFunction:
         """Test run with on_trigger callback."""
         import facemoment as fm
 
+        # Use backend="simple" to test MomentDetector code path
         with patch.object(fm.MomentDetector, "process_file") as mock_process:
             mock_process.return_value = []
 
             callbacks = []
-            result = fm.run("fake_video.mp4", extractors=["dummy"], on_trigger=lambda t: callbacks.append(t))
+            result = fm.run("fake_video.mp4", extractors=["dummy"], on_trigger=lambda t: callbacks.append(t), backend="simple")
 
             assert isinstance(result, fm.Result)
 
@@ -47,11 +49,12 @@ class TestRunFunction:
         """Test run with output directory for clips."""
         import facemoment as fm
 
+        # Use backend="simple" to test MomentDetector code path
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.object(fm.MomentDetector, "process_file") as mock_process:
                 mock_process.return_value = []
 
-                result = fm.run("fake_video.mp4", output_dir=tmpdir, extractors=["dummy"])
+                result = fm.run("fake_video.mp4", output_dir=tmpdir, extractors=["dummy"], backend="simple")
 
                 assert result.clips_extracted == 0
 
@@ -59,10 +62,11 @@ class TestRunFunction:
         """Test run with specific extractor list."""
         import facemoment as fm
 
+        # Use backend="simple" to test MomentDetector code path
         with patch.object(fm.MomentDetector, "process_file") as mock_process:
             mock_process.return_value = []
 
-            result = fm.run("fake_video.mp4", extractors=["quality"])
+            result = fm.run("fake_video.mp4", extractors=["quality"], backend="simple")
 
             assert isinstance(result, fm.Result)
 
@@ -93,6 +97,7 @@ class TestConfiguration:
 
         assert fm.DEFAULT_FPS == 10
         assert fm.DEFAULT_COOLDOWN == 2.0
+        assert fm.DEFAULT_BACKEND == "pathway"
 
 
 class TestExports:

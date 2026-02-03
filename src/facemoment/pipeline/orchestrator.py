@@ -119,6 +119,7 @@ class PipelineOrchestrator:
         fusion: Optional[BaseFusion] = None,
         fusion_config: Optional[FusionConfig] = None,
         clip_output_dir: Optional[Path] = None,
+        backend: str = "pathway",
     ):
         if not extractor_configs:
             raise ValueError("At least one extractor config is required")
@@ -127,6 +128,7 @@ class PipelineOrchestrator:
         self._fusion = fusion
         self._fusion_config = fusion_config or FusionConfig()
         self._clip_output_dir = Path(clip_output_dir) if clip_output_dir else Path("./clips")
+        self._backend = backend
 
         # Workers (created on start)
         self._workers: Dict[str, BaseWorker] = {}
@@ -155,6 +157,7 @@ class PipelineOrchestrator:
             extractor_configs=config.extractors,
             fusion_config=config.fusion,
             clip_output_dir=Path(config.clip_output_dir),
+            backend=config.backend,
         )
 
     def _create_fusion(self) -> BaseFusion:
@@ -244,6 +247,9 @@ class PipelineOrchestrator:
     def _process_frame(self, frame: Frame) -> List[Observation]:
         """Process a frame through all workers.
 
+        Accumulates deps from each worker's result and passes them to
+        subsequent workers that declare dependencies via extractor.depends.
+
         Args:
             frame: Frame to process.
 
@@ -251,9 +257,10 @@ class PipelineOrchestrator:
             List of observations from all workers.
         """
         observations = []
+        deps: Dict[str, Observation] = {}
 
         for name, worker in self._workers.items():
-            result = worker.process(frame)
+            result = worker.process(frame, deps=deps)
 
             # Track timing stats
             if name not in self._stats.worker_stats:
@@ -272,6 +279,7 @@ class PipelineOrchestrator:
                 logger.warning(f"Worker '{name}' error: {result.error}")
             elif result.observation is not None:
                 observations.append(result.observation)
+                deps[name] = result.observation
 
         return observations
 
@@ -337,6 +345,9 @@ class PipelineOrchestrator:
     ) -> List[ClipResult]:
         """Run the complete pipeline on a video file.
 
+        Uses Pathway backend if configured and available, otherwise falls back
+        to worker-based execution.
+
         Args:
             video_path: Path to the input video file.
             fps: Analysis frame rate (default: 10).
@@ -348,6 +359,133 @@ class PipelineOrchestrator:
         Example:
             >>> clips = orchestrator.run("video.mp4", fps=10)
             >>> print(f"Extracted {len(clips)} clips")
+        """
+        # Check if we should use Pathway backend
+        from facemoment.pipeline.pathway_pipeline import PATHWAY_AVAILABLE
+
+        if self._backend == "pathway":
+            if PATHWAY_AVAILABLE:
+                return self._run_pathway(video_path, fps, resolution)
+            else:
+                logger.info("Pathway not available, falling back to worker-based execution")
+
+        # Fall back to worker-based execution
+        return self._run_workers(video_path, fps, resolution)
+
+    def _run_pathway(
+        self,
+        video_path: str,
+        fps: int = 10,
+        resolution: Optional[Tuple[int, int]] = None,
+    ) -> List[ClipResult]:
+        """Run pipeline using Pathway backend.
+
+        Args:
+            video_path: Path to the input video file.
+            fps: Analysis frame rate.
+            resolution: Analysis resolution.
+
+        Returns:
+            List of ClipResult for each extracted clip.
+        """
+        from facemoment.pipeline.pathway_pipeline import FacemomentPipeline
+
+        clips: List[ClipResult] = []
+        start_time = time.time()
+
+        # Reset stats
+        self._stats = PipelineStats()
+
+        # Create pipeline
+        extractor_names = [c.name for c in self._extractor_configs]
+        pipeline = FacemomentPipeline(
+            extractors=extractor_names,
+            fusion_config={
+                "cooldown_sec": self._fusion_config.cooldown_sec,
+                "main_only": True,
+                **self._fusion_config.kwargs,
+            },
+        )
+
+        try:
+            # Connect to video source
+            self._clip_output_dir.mkdir(parents=True, exist_ok=True)
+            self._vb = VisualBase(clip_output_dir=self._clip_output_dir)
+            self._vb.connect(FileSource(video_path))
+
+            # Collect frames
+            frames = []
+            for frame in self._vb.get_stream(fps=fps, resolution=resolution):
+                frames.append(frame)
+                if self._on_frame:
+                    self._on_frame(frame)
+            self._stats.frames_processed = len(frames)
+
+            # Track triggers
+            triggers = []
+
+            def on_trigger(trigger):
+                triggers.append(trigger)
+                self._stats.triggers_fired += 1
+
+                # Callback
+                if self._on_trigger:
+                    from facemoment.moment_detector.fusion.base import FusionResult
+                    result = FusionResult(
+                        should_trigger=True,
+                        trigger=trigger,
+                        score=trigger.score,
+                    )
+                    self._on_trigger(trigger, result)
+
+                # Extract clip
+                clip_result = self._vb.trigger(trigger)
+                clips.append(clip_result)
+
+                if clip_result.success:
+                    self._stats.clips_extracted += 1
+
+            # Run pipeline
+            pipeline.run(frames, on_trigger=on_trigger)
+
+            self._vb.disconnect()
+
+        except ImportError as e:
+            # Pathway not installed, fall back to workers
+            logger.info(f"Pathway not available: {e}, falling back to worker-based execution")
+            if self._vb:
+                self._vb.disconnect()
+            return self._run_workers(video_path, fps, resolution)
+        except Exception as e:
+            # Pathway execution failed (schema issues, etc.), fall back to workers
+            logger.warning(f"Pathway execution failed: {e}, falling back to worker-based execution")
+            if self._vb:
+                self._vb.disconnect()
+            return self._run_workers(video_path, fps, resolution)
+
+        # Calculate final stats
+        elapsed = time.time() - start_time
+        self._stats.processing_time_sec = elapsed
+        if self._stats.frames_processed > 0:
+            self._stats.avg_frame_time_ms = (elapsed * 1000) / self._stats.frames_processed
+
+        return clips
+
+    def _run_workers(
+        self,
+        video_path: str,
+        fps: int = 10,
+        resolution: Optional[Tuple[int, int]] = None,
+    ) -> List[ClipResult]:
+        """Run pipeline using worker-based execution.
+
+        Args:
+            video_path: Path to the input video file.
+            fps: Analysis frame rate.
+            resolution: Analysis resolution.
+
+        Returns:
+            List of ClipResult for each extracted clip.
         """
         clips: List[ClipResult] = []
         start_time = time.time()

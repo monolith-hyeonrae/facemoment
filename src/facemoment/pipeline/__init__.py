@@ -51,6 +51,10 @@ from facemoment.pipeline.orchestrator import (
     PipelineOrchestrator,
     PipelineStats,
 )
+from facemoment.pipeline.pathway_pipeline import (
+    FacemomentPipeline,
+    PATHWAY_AVAILABLE,
+)
 
 # Re-export ClipResult for convenience
 from visualbase import ClipResult
@@ -64,6 +68,9 @@ __all__ = [
     # Orchestration
     "PipelineOrchestrator",
     "PipelineStats",
+    # Pathway integration (Phase 17)
+    "FacemomentPipeline",
+    "PATHWAY_AVAILABLE",
     # Results
     "ClipResult",
 ]
