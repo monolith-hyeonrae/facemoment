@@ -1,7 +1,7 @@
 # FaceMoment - Claude Session Context
 
 > 최종 업데이트: 2026-02-03
-> 상태: **Phase 18 완료** - deps 전경로 지원 및 venv 격리 정상화
+> 상태: **Phase 19 완료** - debug 백엔드 정비, PathwayBackend 실동작, 시각화 개선
 
 ## 프로젝트 역할
 
@@ -20,6 +20,7 @@
 - 시각화 개선 (Phase 16) - 탑승자 구분 색상, 상반신 포즈 스켈레톤
 - Pathway 백엔드 통합 (Phase 17) - visualpath PathwayBackend를 기본 실행 백엔드로 사용
 - **deps 전경로 지원 및 venv 격리** (Phase 18) - 모든 실행 경로에서 deps 전달, fine-grained extras
+- **debug 백엔드 정비** (Phase 19) - PathwayBackend 실동작, debug 기본 inline, backend label 정확 표시
 
 ## 아키텍처 위치
 
@@ -280,7 +281,7 @@ for ext in extractors:
 
 | 실행 경로 | deps 지원 | 위치 |
 |-----------|-----------|------|
-| `fm.run()` → FacemomentPipeline → PathwayBackend.run_simple() | ✅ | backend.py |
+| `fm.run()` → FacemomentPipeline → PathwayBackend.run() | ✅ | backend.py |
 | `fm.run()` → FacemomentPipeline → _run_simple() | ✅ | pathway_pipeline.py |
 | `PipelineOrchestrator` → _run_workers() → _process_frame() | ✅ | orchestrator.py |
 | `PipelineOrchestrator` → _run_pathway() → FacemomentPipeline | ✅ | orchestrator.py |
@@ -573,18 +574,18 @@ from facemoment.moment_detector.extractors.gesture import GestureExtractor # [ge
 facemoment info                          # extractor/backend 상태, 파이프라인 구조
 facemoment info -v                       # + GPU/ONNX 정보
 
-# 디버그 (통합 명령어) - 기본: Pathway 백엔드
-facemoment debug video.mp4               # 모든 extractor + FaceClassifier 자동 적용 [PATHWAY]
+# 디버그 (통합 명령어) - 기본: inline (부드러운 시각화)
+facemoment debug video.mp4               # 모든 extractor + FaceClassifier 자동 적용 [INLINE]
 facemoment debug video.mp4 -e raw        # 원본 비디오 프리뷰 (분석 없음)
-facemoment debug video.mp4 -e face       # face만 (+ classifier로 역할별 색상) [PATHWAY]
-facemoment debug video.mp4 -e pose       # pose만 (상반신 스켈레톤 표시) [PATHWAY]
-facemoment debug video.mp4 -e face,pose  # 복수 선택 [PATHWAY]
-facemoment debug video.mp4 -e gesture    # gesture만 [PATHWAY]
+facemoment debug video.mp4 -e face       # face만 (+ classifier로 역할별 색상) [INLINE]
+facemoment debug video.mp4 -e pose       # pose만 (상반신 스켈레톤 표시) [INLINE]
+facemoment debug video.mp4 -e face,pose  # 복수 선택 [INLINE]
+facemoment debug video.mp4 -e gesture    # gesture만 [INLINE]
 facemoment debug video.mp4 --no-ml       # dummy 모드 (ML 없이) - simple 백엔드
 facemoment debug video.mp4 -o out.mp4    # 파일로 저장
 facemoment debug video.mp4 -e face --profile  # 성능 프로파일링
-facemoment debug video.mp4 --backend simple   # simple 백엔드 사용 (library 모드)
-facemoment debug video.mp4 --backend pathway  # 기본값, Pathway 스트리밍
+facemoment debug video.mp4 --backend simple   # SimpleDebugSession (library 모드)
+facemoment debug video.mp4 --backend pathway  # Pathway 스트리밍 엔진 (배치 처리, 끊김 있음)
 
 # 디버그 (Distributed 모드)
 facemoment debug video.mp4 --distributed     # 분산 모드 디버그
@@ -723,12 +724,12 @@ cat trace.jsonl | jq 'select(.record_type=="trigger_fire")'
 | `moment_detector/visualize.py` | DebugVisualizer, 타이밍 오버레이 |
 | `observability/__init__.py` | ObservabilityHub |
 
-### visualpath (deps 관련, Phase 18 수정)
+### visualpath (deps 관련, Phase 18-19 수정)
 
 | 파일 | 역할 |
 |------|------|
-| `backends/pathway/operators.py` | Pathway UDF (deps 누적) |
-| `backends/pathway/backend.py` | PathwayBackend (run_simple deps, run fusion 수정) |
+| `backends/pathway/operators.py` | Pathway UDF (deps 누적, composite face→face_detect 매핑) |
+| `backends/pathway/backend.py` | PathwayBackend.run() (on_frame_result 콜백, frame passthrough) |
 | `backends/simple/executor.py` | 4개 Executor (Sequential/ThreadPool/Timeout/Adaptive deps) |
 | `process/launcher.py` | Worker 런처 (BaseWorker.process(deps=), VenvWorker ZMQ deps) |
 | `process/worker.py` | Worker subprocess (deps 수신/역직렬화/전달) |
@@ -861,10 +862,11 @@ clips = orchestrator.run("video.mp4", fps=10)
 # facemoment process video.mp4 --distributed --config pipeline.yaml
 ```
 
-## Pathway 백엔드 통합 (Phase 17-18)
+## Pathway 백엔드 통합 (Phase 17-19)
 
-facemoment가 visualpath의 PathwayBackend를 기본 실행 백엔드로 사용합니다.
+facemoment가 visualpath의 PathwayBackend를 실행 백엔드로 사용합니다.
 Phase 18에서 모든 실행 경로에 deps 지원이 추가되었습니다.
+Phase 19에서 `backend.run_simple()` 버그를 수정하여 PathwayBackend가 실제로 동작하게 되었습니다.
 
 ### 아키텍처
 
@@ -922,23 +924,39 @@ if PATHWAY_AVAILABLE:
 
 | 백엔드 | 설명 | 장점 |
 |--------|------|------|
-| `pathway` | Pathway 스트리밍 엔진 (기본) | 이벤트 시간 기반, 워터마크, 백프레셔 |
+| `pathway` | Pathway 스트리밍 엔진 | 이벤트 시간 기반, 워터마크, 백프레셔 |
 | `simple` | 순차 실행 (fallback) | 의존성 없음, 간단한 디버깅 |
+
+#### process 명령 (기본: pathway)
 
 ```python
 # Python API
-result = fm.run("video.mp4", backend="pathway")
+result = fm.run("video.mp4", backend="pathway")  # 기본값
 result = fm.run("video.mp4", backend="simple")
 
-# PipelineOrchestrator
-orchestrator = PipelineOrchestrator(
-    extractor_configs=configs,
-    backend="pathway",  # 또는 "simple"
-)
-
 # CLI
-facemoment process video.mp4 --backend pathway
+facemoment process video.mp4 --backend pathway  # 기본값
 facemoment process video.mp4 --backend simple
+```
+
+#### debug 명령 (기본: inline)
+
+debug 모드는 프레임별 시각화가 필요하므로 기본값이 **inline**입니다.
+Pathway의 배치 처리(`autocommit_duration_ms`)는 프레임을 묶어서 처리하기 때문에
+시각화가 끊기는 현상이 발생합니다. inline은 동일한 extractor/fusion을 사용하되
+프레임 단위로 순차 실행하여 부드러운 시각화를 제공합니다.
+
+| 옵션 | Backend 표시 | 실행 방식 |
+|------|-------------|-----------|
+| (기본) | `pathway (inline)` | 프레임별 순차 처리, 부드러운 시각화 |
+| `--backend pathway` | `pathway` | Pathway 스트리밍 엔진 (배치 처리, 끊김 있음) |
+| `--backend simple` | `simple` | SimpleDebugSession (MomentDetector) |
+| `--no-ml` | `simple` | DummyExtractor |
+
+```bash
+facemoment debug video.mp4 -e face                   # inline (기본, 부드러움)
+facemoment debug video.mp4 -e face --backend pathway  # Pathway 엔진 (검증용)
+facemoment debug video.mp4 -e face --backend simple   # SimpleDebugSession
 ```
 
 ### Merged Observation의 main_face_id
@@ -956,11 +974,11 @@ fusion.update(obs, classifier_obs=classifier_obs)  # 명시적 전달 (우선)
 
 ## 다음 작업 우선순위
 
-### 단기 (Phase 18 후속)
+### 단기 (Phase 19 후속)
 1. 실제 GR차량 영상으로 분산 venv 격리 통합 테스트
-2. Pathway 성능 벤치마크 (vs simple 백엔드)
+2. Pathway 성능 벤치마크 (process 명령: pathway vs simple)
 
-### 중기 (Phase 19+)
+### 중기 (Phase 20+)
 3. portrait981을 facemoment 호출로 단순화
 4. 새로운 의존성 기반 extractor 개발 (HeadPoseExtractor 등)
 
@@ -1002,3 +1020,13 @@ fusion.update(obs, classifier_obs=classifier_obs)  # 명시적 전달 (우선)
   - facemoment: pyproject.toml fine-grained extras (`face-detect`, `expression` 분리)
   - facemoment: entry_points에 `face_detect`, `expression`, `face_classifier` 등록
   - facemoment: `local` extra에 pyzmq 추가
+- **debug 백엔드 정비 및 PathwayBackend 실동작 (Phase 19)**:
+  - `pathway_pipeline.py`: `backend.run_simple()` → `backend.run()` 버그 수정 (Pathway 미동작 근본 원인)
+  - `PathwayBackend.run()`: `on_frame_result` 콜백 추가 (frame passthrough, 프레임별 결과 전달)
+  - `operators.py`: composite "face" → "face_detect" deps 매핑 추가 (FaceClassifier 경고 해결)
+  - `DummyFusion.update()`: `**kwargs` 추가 (classifier_obs 전달 시 TypeError 수정)
+  - `stats_panel.py`: backend label 색상 코딩 개선 (pathway=초록, fallback=주황)
+  - `main.py`: `Result.actual_backend` 필드 추가
+  - debug 기본 백엔드를 inline으로 변경 (Pathway 배치 처리로 인한 시각화 끊김 해결)
+  - `--backend pathway` 명시 시 실제 Pathway 스트리밍 엔진 사용 가능
+  - `cli/__init__.py`: debug --backend 기본값 None (inline) / pathway / simple 구분
