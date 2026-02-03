@@ -90,10 +90,19 @@ class StatsPanel:
         x = rx1 + 8
         y = ry1 + 18
 
-        # Backend label
+        # Backend label with color coding:
+        # Green = confirmed pathway, Orange = fallback to simple, Cyan = explicit simple
         if backend_label:
-            label_color = (0, 255, 100) if backend_label == "PATHWAY" else (0, 200, 255)
-            cv2.putText(canvas, f"[{backend_label}]", (x, y), FONT, 0.45, label_color, 1)
+            label_upper = backend_label.upper()
+            if "PATHWAY" in label_upper and "unavailable" not in label_upper:
+                label_color = (0, 255, 100)  # green
+            elif "SIMPLE" in label_upper or "unavailable" in label_upper or "subprocess" in label_upper:
+                label_color = (0, 165, 255)  # orange — fallback
+            elif "DISTRIBUTED" in label_upper:
+                label_color = (255, 200, 0)  # cyan
+            else:
+                label_color = (0, 200, 255)  # yellow-ish default
+            cv2.putText(canvas, f"[{backend_label}]", (x, y), FONT, 0.40, label_color, 1)
             y += 20
 
         # Monitor stats (Pathway mode)

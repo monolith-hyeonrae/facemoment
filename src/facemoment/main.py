@@ -61,6 +61,7 @@ class Result:
     frame_count: int = 0
     duration_sec: float = 0.0
     clips_extracted: int = 0
+    actual_backend: str = ""
 
 
 # =============================================================================
@@ -163,6 +164,7 @@ def _run_pathway(
         # Run pipeline
         triggers = pipeline.run(frames, on_trigger=on_trigger)
         result.triggers = triggers
+        result.actual_backend = pipeline.actual_backend or "unknown"
 
         # Extract clips if output_dir specified
         if output_dir:
@@ -225,6 +227,7 @@ def _run_simple(
     result.frame_count = detector.frames_processed
     result.duration_sec = result.frame_count / fps if fps > 0 else 0
     result.clips_extracted = len([c for c in clips if c.success])
+    result.actual_backend = "simple"
 
     return result
 
@@ -255,6 +258,7 @@ if __name__ == "__main__":
     result = run(video_path, output_dir=output_dir)
 
     print(f"\nResults:")
+    print(f"  Backend used: {result.actual_backend}")
     print(f"  Frames processed: {result.frame_count}")
     print(f"  Duration: {result.duration_sec:.1f}s")
     print(f"  Triggers found: {len(result.triggers)}")

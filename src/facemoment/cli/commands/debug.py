@@ -136,11 +136,11 @@ class DebugSession:
             print(f"Error: Cannot open {self.args.path}")
             sys.exit(1)
 
-        # Header
-        self._print_header()
-
-        # Pipeline-specific setup
+        # Pipeline-specific setup (must run before header to detect actual backend)
         self._setup_pipeline()
+
+        # Header (after pipeline setup so backend_label is accurate)
+        self._print_header()
 
         # ROI info
         roi_pct = f"{int(self.roi[0]*100)}%-{int(self.roi[2]*100)}% x {int(self.roi[1]*100)}%-{int(self.roi[3]*100)}%"
@@ -303,16 +303,26 @@ class DebugSession:
 # ---------------------------------------------------------------------------
 
 class PathwayDebugSession(DebugSession):
-    """Debug session using Pathway pipeline with PathwayMonitor."""
+    """Debug session using Pathway pipeline with PathwayMonitor.
+
+    When PathwayBackend is available and no subprocess workers are needed,
+    uses actual Pathway engine in a 2-phase approach:
+      Phase 1: Process all frames through PathwayBackend (batch)
+      Phase 2: Replay results with visualization (interactive)
+
+    Falls back to inline processing when Pathway is unavailable or
+    subprocess workers are active (CUDA conflict isolation).
+    """
 
     def __init__(self, args, selected, show_window):
         super().__init__(args, selected, show_window)
         self.backend_label = "PATHWAY"
         self.pipeline = None
         self.monitor = None
+        self._use_pathway = False
 
     def _setup_pipeline(self):
-        from facemoment.pipeline.pathway_pipeline import FacemomentPipeline
+        from facemoment.pipeline.pathway_pipeline import FacemomentPipeline, PATHWAY_AVAILABLE
         from facemoment.observability.pathway_monitor import PathwayMonitor
 
         # Build extractor list
@@ -335,10 +345,23 @@ class PathwayDebugSession(DebugSession):
         )
         self.pipeline.initialize()
 
+        # Detect actual backend
+        if not PATHWAY_AVAILABLE:
+            self._use_pathway = False
+            self.backend_label = "INLINE (pathway unavailable)"
+            print("WARNING: Pathway backend not available — running inline execution")
+        elif self.pipeline.workers:
+            self._use_pathway = False
+            self.backend_label = "INLINE (subprocess workers active)"
+            print("WARNING: ProcessWorkers active — Pathway cannot manage subprocesses, running inline execution")
+        else:
+            self._use_pathway = True
+            self.backend_label = "PATHWAY"
+
         # Print extractor status
         initialized_names = {ext.name for ext in self.pipeline.extractors}
         worker_names = set(self.pipeline.workers.keys())
-        print("Extractors (pathway mode):")
+        print("Extractors:")
         for name in extractor_names:
             if name in worker_names:
                 print(f"  [+] {name}: enabled (subprocess)")
@@ -374,7 +397,195 @@ class PathwayDebugSession(DebugSession):
                         print(f"  {component.capitalize():12}: {backend_name}")
             print("-" * 50)
 
+    def _loop(self):
+        """Route to Pathway or inline loop based on availability."""
+        if self._use_pathway:
+            self._loop_pathway()
+        else:
+            self._loop_inline()
+
+    def _loop_pathway(self):
+        """2-phase loop: process through PathwayBackend, then replay with visualization."""
+        import cv2
+        from visualpath.backends.pathway import PathwayBackend
+
+        # Phase 1: Collect frames and process through Pathway engine
+        frames = list(self.stream)
+        total = len(frames)
+        print(f"Phase 1: Processing {total} frames through Pathway engine...")
+
+        frame_results = {}  # frame_id -> dict
+        trigger_count = 0
+
+        fusion = self.pipeline.fusion
+
+        def on_frame_result(frame, obs_list, fusion_result):
+            nonlocal trigger_count
+            obs_dict = {obs.source: obs for obs in obs_list}
+            classifier_obs = obs_dict.get("face_classifier")
+            is_gate_open = fusion.is_gate_open if fusion else False
+            in_cooldown = fusion.in_cooldown if fusion else False
+            frame_results[frame.frame_id] = {
+                "observations": obs_dict,
+                "classifier_obs": classifier_obs,
+                "fusion_result": fusion_result,
+                "is_gate_open": is_gate_open,
+                "in_cooldown": in_cooldown,
+            }
+            if fusion_result and fusion_result.should_trigger:
+                trigger_count += 1
+                event_t = fusion_result.trigger.event_time_ns / 1e9 if fusion_result.trigger else 0
+                print(f"  TRIGGER #{trigger_count}: {fusion_result.reason} (t={event_t:.2f}s)")
+
+        backend = PathwayBackend(window_ns=self.pipeline._window_ns)
+        backend.run(
+            frames=iter(frames),
+            extractors=self.pipeline.extractors,
+            fusion=fusion,
+            on_frame_result=on_frame_result,
+        )
+
+        pw_stats = backend.get_stats()
+        pw_fps = pw_stats.get("throughput_fps", 0)
+        print(f"Phase 1 complete: {len(frame_results)}/{total} frames, "
+              f"{trigger_count} triggers, {pw_fps:.1f} FPS")
+
+        # Phase 2: Replay with visualization
+        print(f"Phase 2: Replay with visualization...")
+        print("-" * 50)
+        print("Controls: [q] quit, [r] reset, [space] pause")
+        print("Layers:   [1] face [2] pose [3] ROI [4] stats")
+        print("          [5] timeline [6] trigger [7] fusion [8] frame info")
+        print("-" * 50)
+
+        # Re-create fusion for replay (clean state for visualization timeline)
+        replay_fusion = self.pipeline._build_fusion()
+
+        for frame in frames:
+            result = frame_results.get(frame.frame_id)
+            if result is None:
+                continue
+
+            obs_dict = result["observations"]
+            classifier_obs = result["classifier_obs"]
+            original_fusion_result = result["fusion_result"]
+            is_gate_open = result["is_gate_open"]
+            in_cooldown = result["in_cooldown"]
+
+            # Re-run fusion for replay timeline (keeps visualizer timeline in sync)
+            replay_fusion_result = None
+            face_obs = obs_dict.get("face") or obs_dict.get("dummy")
+            if replay_fusion and face_obs:
+                obs_list = list(obs_dict.values())
+                merged_obs = self.pipeline._merge_observations(obs_list, frame)
+                replay_fusion_result = replay_fusion.update(merged_obs, classifier_obs=classifier_obs)
+
+            # Use original trigger/gate state but replay fusion for timeline
+            display_fusion = original_fusion_result if original_fusion_result else replay_fusion_result
+
+            debug_image = self.visualizer.create_debug_view(
+                frame,
+                face_obs=face_obs,
+                pose_obs=obs_dict.get("pose"),
+                quality_obs=obs_dict.get("quality"),
+                classifier_obs=classifier_obs,
+                fusion_result=display_fusion,
+                is_gate_open=is_gate_open,
+                in_cooldown=in_cooldown,
+                roi=self.roi,
+                backend_label=self.backend_label,
+            )
+
+            # Writer
+            if self.args.output and not self.writer_initialized:
+                dh, dw = debug_image.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                self.writer = cv2.VideoWriter(
+                    self.args.output, fourcc, self.args.fps, (dw, dh)
+                )
+                self.writer_initialized = True
+
+            if self.writer:
+                self.writer.write(debug_image)
+
+            if self.show_window:
+                cv2.imshow("Debug", debug_image)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                elif key == ord("r"):
+                    replay_fusion.reset()
+                    self.visualizer.reset()
+                elif key == ord(" "):
+                    cv2.waitKey(0)
+                elif ord("1") <= key <= ord("8"):
+                    self._toggle_layer(key - ord("0"))
+
+            self.frame_count += 1
+            if self.frame_count % 100 == 0:
+                print(f"\rReplay: {self.frame_count}/{total}", end="", flush=True)
+
+        print()
+
+    def _loop_inline(self):
+        """Inline frame-by-frame loop (fallback when Pathway unavailable)."""
+        import cv2
+
+        for frame in self.stream:
+            result = self._process_frame_inline(frame)
+            if result is None:
+                continue
+
+            debug_image, timing_info = result
+
+            if self.args.output and not self.writer_initialized:
+                dh, dw = debug_image.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                self.writer = cv2.VideoWriter(
+                    self.args.output, fourcc, self.args.fps, (dw, dh)
+                )
+                self.writer_initialized = True
+
+            if self.writer:
+                self.writer.write(debug_image)
+
+            if self.show_window:
+                cv2.imshow("Debug", debug_image)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                elif key == ord("r"):
+                    self._on_reset()
+                elif key == ord(" "):
+                    cv2.waitKey(0)
+                elif ord("1") <= key <= ord("8"):
+                    self._toggle_layer(key - ord("0"))
+
+            self.frame_count += 1
+
+            if self.profile_mode and timing_info:
+                detect_ms = timing_info.get('detect_ms', 0)
+                expr_ms = timing_info.get('expression_ms', 0)
+                total_ms = timing_info.get('total_ms', 0)
+                print(
+                    f"\rFrame {frame.frame_id}: detect={detect_ms:.1f}ms, "
+                    f"expression={expr_ms:.1f}ms, total={total_ms:.1f}ms    ",
+                    end="", flush=True,
+                )
+            elif self.frame_count % 100 == 0:
+                print(
+                    f"\rFrame {self.frame_count}/{self.source.frame_count}",
+                    end="", flush=True,
+                )
+
+        print()
+
     def _process_frame(self, frame):
+        # Unused — _loop() is overridden. Kept for interface compatibility.
+        return self._process_frame_inline(frame)
+
+    def _process_frame_inline(self, frame):
+        """Process one frame inline (no PathwayBackend)."""
         self.monitor.begin_frame(frame)
 
         observations = {}
@@ -469,7 +680,7 @@ class PathwayDebugSession(DebugSession):
             timing=timing_info if self.profile_mode else None,
             roi=self.roi,
             monitor_stats=self.monitor.get_frame_stats(),
-            backend_label="PATHWAY",
+            backend_label=self.backend_label,
         )
 
         return debug_image, timing_info

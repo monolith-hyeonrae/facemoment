@@ -55,7 +55,7 @@ class DummyFusion(BaseFusion):
         self._gate_open: bool = False
         self._observation_count: int = 0
 
-    def update(self, observation: Observation) -> FusionResult:
+    def update(self, observation: Observation, **kwargs) -> FusionResult:
         """Process observation and decide on trigger."""
         self._recent_observations.append(observation)
         self._observation_count += 1

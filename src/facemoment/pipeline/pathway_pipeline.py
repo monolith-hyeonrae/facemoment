@@ -81,6 +81,7 @@ class FacemomentPipeline:
         self._fusion = None
         self._classifier = None
         self._initialized = False
+        self.actual_backend: Optional[str] = None
 
     # Extractors that depend on torch must initialize before onnxruntime-gpu.
     # If onnxruntime loads CUDA first, torch's libc10_cuda.so fails with
@@ -314,7 +315,8 @@ class FacemomentPipeline:
             if PATHWAY_AVAILABLE:
                 return self._run_pathway(frames, on_trigger)
             else:
-                logger.info("Pathway not available, using simple execution")
+                logger.warning("Pathway backend not available, falling back to simple execution")
+                self.actual_backend = "simple"
                 return self._run_simple(frames, on_trigger)
         finally:
             self.cleanup()
@@ -337,24 +339,26 @@ class FacemomentPipeline:
             List of triggers that fired.
         """
         if self._workers:
-            logger.info(
-                "ProcessWorkers active (%s), using simple execution loop",
+            logger.warning(
+                "ProcessWorkers active (%s), Pathway cannot manage subprocesses — falling back to simple execution",
                 list(self._workers.keys()),
             )
+            self.actual_backend = "simple"
             return self._run_simple(frames, on_trigger)
 
         try:
             backend = PathwayBackend(window_ns=self._window_ns)
         except ImportError:
-            # Pathway not actually installed, fallback to simple
-            logger.info("Pathway not installed, falling back to simple execution")
+            logger.warning("Pathway not installed, falling back to simple execution")
+            self.actual_backend = "simple"
             return self._run_simple(frames, on_trigger)
+
+        self.actual_backend = "pathway"
 
         # Ensure frames is an iterator
         frame_iter = iter(frames) if isinstance(frames, list) else frames
 
-        # Use run_simple for more predictable results
-        return backend.run_simple(
+        return backend.run(
             frames=frame_iter,
             extractors=self._extractors,
             fusion=self._fusion,
