@@ -46,6 +46,10 @@ Examples:
         "--deps", action="store_true",
         help="Show extractor dependency graph",
     )
+    info_parser.add_argument(
+        "--graph", nargs="?", const="ascii", choices=["ascii", "dot"],
+        help="Show pipeline FlowGraph (ascii or dot format, default: ascii)",
+    )
 
     # debug command (unified)
     debug_parser = subparsers.add_parser(

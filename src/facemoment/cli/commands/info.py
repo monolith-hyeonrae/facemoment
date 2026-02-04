@@ -13,6 +13,12 @@ def run_info(args):
         _print_dependency_graph()
         return
 
+    # Handle --graph flag
+    graph_format = getattr(args, 'graph', None)
+    if graph_format is not None:
+        _print_flow_graph(graph_format)
+        return
+
     print("FaceMoment - System Information")
     print("=" * 60)
 
@@ -289,3 +295,138 @@ def _print_dependency_graph():
 │ pose │     │ gesture │     │ fusion  │
 └──────┘     └─────────┘     └─────────┘
 """)
+
+
+def _build_facemoment_flow_graph():
+    """Build a FlowGraph representing the facemoment pipeline.
+
+    Creates a graph with individual extractor nodes showing dependency
+    relationships, rather than a single pipeline node.
+    """
+    from visualpath.flow import FlowGraph
+
+    # Define all facemoment extractors with their dependencies
+    extractor_defs = [
+        ("quality", [], "QualityExtractor"),
+        ("face_detect", [], "FaceDetectionExtractor"),
+        ("face_classifier", ["face_detect"], "FaceClassifierExtractor"),
+        ("expression", ["face_detect"], "ExpressionExtractor"),
+        ("pose", [], "PoseExtractor"),
+        ("gesture", [], "GestureExtractor"),
+    ]
+
+    # Check which extractors are actually available
+    availability = {}
+    availability["quality"] = True  # always available
+    try:
+        from facemoment.moment_detector.extractors.face_detect import FaceDetectionExtractor  # noqa: F401
+        availability["face_detect"] = True
+    except ImportError:
+        availability["face_detect"] = False
+    try:
+        from facemoment.moment_detector.extractors.face_classifier import FaceClassifierExtractor  # noqa: F401
+        availability["face_classifier"] = True
+    except ImportError:
+        availability["face_classifier"] = False
+    try:
+        from facemoment.moment_detector.extractors.expression import ExpressionExtractor  # noqa: F401
+        availability["expression"] = True
+    except ImportError:
+        availability["expression"] = False
+    try:
+        from facemoment.moment_detector.extractors.pose import PoseExtractor  # noqa: F401
+        availability["pose"] = True
+    except ImportError:
+        availability["pose"] = False
+    try:
+        from facemoment.moment_detector.extractors.gesture import GestureExtractor  # noqa: F401
+        availability["gesture"] = True
+    except ImportError:
+        availability["gesture"] = False
+
+    # Build graph manually to show dependency structure
+    from visualpath.flow.nodes.source import SourceNode
+    from visualpath.flow.node import FlowNode, FlowData
+
+    # Lightweight stub node for graph visualization
+    class ExtractorNode(FlowNode):
+        """Stub node for visualization only."""
+        def __init__(self, node_name):
+            self._name = node_name
+        @property
+        def name(self):
+            return self._name
+        def process(self, data: FlowData) -> list:
+            return [data]
+
+    class FusionNode(FlowNode):
+        """Stub node for visualization only."""
+        def __init__(self, node_name="fusion"):
+            self._name = node_name
+        @property
+        def name(self):
+            return self._name
+        def process(self, data: FlowData) -> list:
+            return [data]
+
+    graph = FlowGraph(entry_node="source")
+    graph.add_node(SourceNode(name="source"))
+
+    available_names = []
+    for name, deps, _cls_name in extractor_defs:
+        if not availability.get(name, False):
+            continue
+        # Skip if dependencies are not available
+        if deps and not all(availability.get(d, False) for d in deps):
+            continue
+        graph.add_node(ExtractorNode(name))
+        available_names.append(name)
+
+    # Add fusion node
+    graph.add_node(FusionNode("fusion"))
+
+    # Add edges: source → root extractors, deps → dependents, all → fusion
+    for name, deps, _cls_name in extractor_defs:
+        if name not in available_names:
+            continue
+        if not deps:
+            graph.add_edge("source", name)
+        else:
+            for dep in deps:
+                if dep in available_names:
+                    graph.add_edge(dep, name)
+
+    # All leaf extractors → fusion
+    for name in available_names:
+        outgoing = graph.get_outgoing_edges(name)
+        # Only connect to fusion if no other extractor depends on this one
+        if not outgoing:
+            graph.add_edge(name, "fusion")
+
+    return graph, available_names
+
+
+def _print_flow_graph(fmt: str = "ascii"):
+    """Print pipeline FlowGraph visualization.
+
+    Args:
+        fmt: Output format - "ascii" for terminal, "dot" for Graphviz DOT.
+    """
+    try:
+        from visualpath.flow import FlowGraph
+    except ImportError:
+        print("Error: visualpath.flow not available")
+        print("  Install visualpath >= 0.2.0 for FlowGraph support")
+        return
+
+    graph, extractor_names = _build_facemoment_flow_graph()
+
+    print("FaceMoment - Pipeline FlowGraph")
+    print("=" * 60)
+    print(f"  Extractors: {', '.join(extractor_names)}")
+    print()
+
+    if fmt == "dot":
+        print(graph.to_dot("FaceMoment Pipeline"))
+    else:
+        print(graph.print_ascii())
