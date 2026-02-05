@@ -264,11 +264,27 @@ class StatsPanel:
         cv2.putText(canvas, f"Trans: {transient_count}  Noise: {noise_count}", (x, y), FONT, FONT_SMALL, COLOR_GRAY_BGR, 1)
         y += 16
 
-        # Main face ID
-        if hasattr(data, "main_face") and data.main_face:
-            face_id = data.main_face.face.face_id
-            cv2.putText(canvas, f"Main ID: {face_id}", (x, y), FONT, FONT_SMALL, COLOR_MAIN_BGR, 1)
-            y += 16
+        # Show all faces with details
+        if hasattr(data, "faces") and data.faces:
+            cv2.putText(canvas, "Faces:", (x, y), FONT, FONT_SMALL, COLOR_GRAY_BGR, 1)
+            y += 12
+            for cf in data.faces[:4]:  # Max 4 faces
+                face = cf.face
+                role = cf.role
+                track = cf.track_length
+                # Color by role
+                role_colors = {
+                    "main": COLOR_MAIN_BGR,
+                    "passenger": (0, 165, 255),  # orange
+                    "transient": (0, 255, 255),  # yellow
+                    "noise": COLOR_GRAY_BGR,
+                }
+                color = role_colors.get(role, COLOR_WHITE_BGR)
+                # Show: ID, role, confidence, area, track length
+                area = cf.avg_area
+                info = f"  {face.face_id}: {role[:4]} c={face.confidence:.2f} a={area:.3f} t={track}"
+                cv2.putText(canvas, info, (x, y), FONT, 0.32, color, 1)
+                y += 11
 
         return y
 

@@ -79,7 +79,9 @@ class FaceExtractor(BaseExtractor):
         self._device = device
         self._track_faces = track_faces
         self._iou_threshold = iou_threshold
-        self._roi = roi if roi is not None else (0.3, 0.1, 0.7, 0.6)
+        # ROI default: wider to include passengers on both sides
+        # Old: (0.3, 0.1, 0.7, 0.6) - too narrow for two-person scenarios
+        self._roi = roi if roi is not None else (0.1, 0.05, 0.9, 0.75)
         self._initialized = False
 
         # Lazy import backends to avoid import errors when dependencies missing
@@ -274,6 +276,7 @@ class FaceExtractor(BaseExtractor):
 
         # Convert to FaceObservations
         face_observations = []
+        prev_faces_update = []  # Track (face_id, original_bbox) for IOU tracking
         max_expression = 0.0
         max_happy = 0.0
         max_angry = 0.0
@@ -299,6 +302,10 @@ class FaceExtractor(BaseExtractor):
             # ROI filter: skip faces with center outside ROI
             roi_x1, roi_y1, roi_x2, roi_y2 = self._roi
             if not (roi_x1 <= center_x <= roi_x2 and roi_y1 <= center_y <= roi_y2):
+                logger.debug(
+                    f"Face {i} filtered by ROI: center=({center_x:.2f}, {center_y:.2f}), "
+                    f"ROI=({roi_x1:.2f}-{roi_x2:.2f}, {roi_y1:.2f}-{roi_y2:.2f})"
+                )
                 continue
 
             # Check if face is fully inside frame (with small margin)
@@ -349,9 +356,11 @@ class FaceExtractor(BaseExtractor):
                 signals=signals,
             )
             face_observations.append(face_obs)
+            # Store original bbox for IOU tracking (not filtered index)
+            prev_faces_update.append((face_id, face.bbox))
 
-        # Update tracking state
-        self._prev_faces = [(f.face_id, detected_faces[i].bbox) for i, f in enumerate(face_observations)]
+        # Update tracking state with correct face_id -> bbox mapping
+        self._prev_faces = prev_faces_update
 
         # Emit observability records
         if _hub.enabled:

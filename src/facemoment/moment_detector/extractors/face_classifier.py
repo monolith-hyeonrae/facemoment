@@ -58,7 +58,7 @@ class FaceClassifierExtractor(BaseExtractor):
 
     Args:
         min_track_frames: Minimum frames to be considered non-transient (default: 5)
-        min_area_ratio: Minimum face area ratio to not be noise (default: 0.01)
+        min_area_ratio: Minimum face area ratio to not be noise (default: 0.005)
         min_confidence: Minimum detection confidence (default: 0.5)
         main_zone: Normalized x-range for main subject (default: (0.3, 0.7))
         edge_margin: Margin from edge to be considered valid (default: 0.05)
@@ -78,8 +78,8 @@ class FaceClassifierExtractor(BaseExtractor):
     def __init__(
         self,
         min_track_frames: int = 5,
-        min_area_ratio: float = 0.01,
-        min_confidence: float = 0.5,
+        min_area_ratio: float = 0.005,
+        min_confidence: float = 0.3,  # Lowered to 0.3 to handle side-angle faces
         main_zone: tuple[float, float] = (0.3, 0.7),
         edge_margin: float = 0.05,
     ):
@@ -277,6 +277,11 @@ class FaceClassifierExtractor(BaseExtractor):
 
         # Check for noise first
         if self._is_noise(face, stats):
+            logger.debug(
+                f"Face {face.face_id} classified as noise: "
+                f"area={face.area_ratio:.4f}, conf={face.confidence:.2f}, "
+                f"bbox={face.bbox}"
+            )
             return ("noise", 0.9)
 
         # Check for transient (not enough tracking history)
@@ -323,6 +328,10 @@ class FaceClassifierExtractor(BaseExtractor):
 
         # Classify based on score
         # High score with good stability = main/passenger candidate
+        logger.debug(
+            f"Face {face.face_id}: score={main_score:.2f}, stability={position_stability:.2f}, "
+            f"drift={max_drift:.3f}, area={avg_area:.4f}, track={track_length}"
+        )
         if main_score >= 0.5 and position_stability >= 0.5:
             return ("main", main_score)
         elif main_score >= 0.3 and position_stability >= 0.3:
@@ -332,23 +341,29 @@ class FaceClassifierExtractor(BaseExtractor):
 
     def _is_noise(self, face: FaceObservation, stats: Dict) -> bool:
         """Check if face is likely noise/false detection."""
-        # Too small
+        # Too small (absolute minimum)
         if face.area_ratio < self._min_area_ratio:
+            logger.debug(f"Face {face.face_id}: noise (too small: {face.area_ratio:.4f} < {self._min_area_ratio})")
             return True
 
         # Low confidence
         if face.confidence < self._min_confidence:
+            logger.debug(f"Face {face.face_id}: noise (low conf: {face.confidence:.2f} < {self._min_confidence})")
             return True
 
-        # At edge of frame
+        # Edge detection: only classify as noise if BOTH conditions are met:
+        # 1. Face is significantly cut off by frame edge (not just near edge)
+        # 2. Face is very small
         x, y, w, h = face.bbox
-        if (x < self._edge_margin or
-            y < self._edge_margin or
-            x + w > 1 - self._edge_margin or
-            y + h > 1 - self._edge_margin):
-            # Edge faces with small area are likely noise
-            if face.area_ratio < 0.02:
-                return True
+        is_cut_off = (
+            x < 0.01 or  # Left edge cut off
+            y < 0.01 or  # Top edge cut off
+            x + w > 0.99 or  # Right edge cut off
+            y + h > 0.99  # Bottom edge cut off
+        )
+        if is_cut_off and face.area_ratio < 0.008:
+            logger.debug(f"Face {face.face_id}: noise (cut off + small: area={face.area_ratio:.4f})")
+            return True
 
         return False
 

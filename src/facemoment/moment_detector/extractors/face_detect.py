@@ -48,7 +48,8 @@ class FaceDetectionExtractor(BaseExtractor):
         self._device = device
         self._track_faces = track_faces
         self._iou_threshold = iou_threshold
-        self._roi = roi if roi is not None else (0.3, 0.1, 0.7, 0.6)
+        # ROI default: wider to include passengers on both sides
+        self._roi = roi if roi is not None else (0.1, 0.05, 0.9, 0.75)
         self._initialized = False
         self._face_backend = face_backend
 
@@ -114,6 +115,7 @@ class FaceDetectionExtractor(BaseExtractor):
 
         # Convert to FaceObservations
         face_observations = []
+        prev_faces_update = []  # Track (face_id, original_bbox) for IOU tracking
         for i, (face, face_id) in enumerate(zip(detected_faces, face_ids)):
             x, y, bw, bh = face.bbox
             norm_x = x / w
@@ -155,13 +157,11 @@ class FaceDetectionExtractor(BaseExtractor):
                 signals={},
             )
             face_observations.append(face_obs)
+            # Store original bbox for IOU tracking (not filtered index)
+            prev_faces_update.append((face_id, face.bbox))
 
-        # Update tracking state
-        self._prev_faces = [
-            (f.face_id, detected_faces[i].bbox)
-            for i, f in enumerate(face_observations)
-            if i < len(detected_faces)
-        ]
+        # Update tracking state with correct face_id -> bbox mapping
+        self._prev_faces = prev_faces_update
 
         timing["total_ms"] = (time.perf_counter_ns() - start_ns) / 1_000_000
 

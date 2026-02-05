@@ -310,8 +310,8 @@ class TestFaceExtractor:
         """Test ROI property getter and setter."""
         extractor = FaceExtractor()
 
-        # Default ROI (center 40% width, top 50% height)
-        assert extractor.roi == (0.3, 0.1, 0.7, 0.6)
+        # Default ROI (wide: 10%-90% width, 5%-75% height)
+        assert extractor.roi == (0.1, 0.05, 0.9, 0.75)
 
         # Valid ROI update
         extractor.roi = (0.2, 0.2, 0.8, 0.8)
