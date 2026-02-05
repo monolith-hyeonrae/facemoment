@@ -9,7 +9,7 @@ import pytest
 
 from facemoment import MomentDetector
 from facemoment.moment_detector.extractors import DummyExtractor, Observation
-from facemoment.moment_detector.fusion import DummyFusion, FusionResult
+from facemoment.moment_detector.fusion import DummyFusion
 
 
 def create_test_video(path: Path, num_frames: int = 90, fps: int = 30) -> None:

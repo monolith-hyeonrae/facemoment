@@ -21,7 +21,7 @@ from facemoment.moment_detector.extractors.base import (
     Observation,
     FaceObservation,
 )
-from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult, Trigger
+from facemoment.moment_detector.fusion.base import BaseFusion, Trigger
 from facemoment.process import (
     ExtractorProcess,
     FusionProcess,
@@ -129,7 +129,7 @@ class MockExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame: Frame) -> Observation:
+    def process(self, frame: Frame, deps=None) -> Observation:
         self._call_count += 1
         if self._name == "face":
             return Observation(
@@ -182,30 +182,45 @@ class MockFusion(BaseFusion):
     """Mock fusion that triggers every N observations."""
 
     def __init__(self, trigger_interval: int = 5):
+        self._name = "mock_fusion"
         self._observations = []
         self._trigger_interval = trigger_interval
         self._gate_open = True
         self._in_cooldown = False
 
-    def update(self, observation: Observation) -> FusionResult:
-        self._observations.append(observation)
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def process(self, frame, deps=None) -> Observation:
+        # Get observation from deps or use frame info
+        t_ns = getattr(frame, "t_src_ns", 0)
+        frame_id = getattr(frame, "frame_id", 0)
+
+        # Track observations count
+        self._observations.append(frame_id)
         should_trigger = len(self._observations) % self._trigger_interval == 0
 
         trigger = None
         if should_trigger:
             trigger = Trigger.point(
-                event_time_ns=observation.t_ns,
+                event_time_ns=t_ns,
                 pre_sec=2.0,
                 post_sec=1.0,
                 label="test_trigger",
                 score=0.85,
             )
 
-        return FusionResult(
-            should_trigger=should_trigger,
-            trigger=trigger,
-            score=0.85 if should_trigger else 0.0,
-            reason="test_trigger" if should_trigger else "",
+        return Observation(
+            source=self._name,
+            frame_id=frame_id,
+            t_ns=t_ns,
+            signals={
+                "should_trigger": should_trigger,
+                "trigger_score": 0.85 if should_trigger else 0.0,
+                "trigger_reason": "test_trigger" if should_trigger else "",
+            },
+            metadata={"trigger": trigger} if trigger else {},
         )
 
     def reset(self) -> None:

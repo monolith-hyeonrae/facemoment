@@ -7,7 +7,7 @@ import time
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
     FaceObservation,
 )
@@ -20,7 +20,7 @@ from facemoment.moment_detector.extractors.outputs import FaceDetectOutput
 logger = logging.getLogger(__name__)
 
 
-class FaceDetectionExtractor(BaseExtractor):
+class FaceDetectionExtractor(Module):
     """Extractor for face detection only.
 
     Detects faces and outputs bounding boxes, landmarks, and head pose.
@@ -33,7 +33,7 @@ class FaceDetectionExtractor(BaseExtractor):
     Example:
         >>> extractor = FaceDetectionExtractor()
         >>> with extractor:
-        ...     obs = extractor.extract(frame)
+        ...     obs = extractor.process(frame)
         ...     print(f"Detected {obs.signals['face_count']} faces")
     """
 
@@ -48,8 +48,8 @@ class FaceDetectionExtractor(BaseExtractor):
         self._device = device
         self._track_faces = track_faces
         self._iou_threshold = iou_threshold
-        # ROI default: wider to include passengers on both sides
-        self._roi = roi if roi is not None else (0.1, 0.05, 0.9, 0.75)
+        # ROI default: matches debug session default for consistency
+        self._roi = roi if roi is not None else (0.3, 0.1, 0.7, 0.6)
         self._initialized = False
         self._face_backend = face_backend
 
@@ -82,7 +82,7 @@ class FaceDetectionExtractor(BaseExtractor):
         self._prev_faces = []
         logger.info("FaceDetectionExtractor cleaned up")
 
-    def extract(
+    def process(
         self,
         frame: Frame,
         deps: Optional[Dict[str, Observation]] = None,

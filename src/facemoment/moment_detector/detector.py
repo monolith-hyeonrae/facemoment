@@ -6,7 +6,7 @@ from pathlib import Path
 from visualbase import VisualBase, FileSource, Frame, Trigger, ClipResult
 
 from facemoment.moment_detector.extractors.base import BaseExtractor, Observation
-from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.moment_detector.fusion.base import BaseFusion
 
 
 class MomentDetector:
@@ -51,7 +51,7 @@ class MomentDetector:
         # Callbacks
         self._on_frame: Optional[Callable[[Frame], None]] = None
         self._on_observation: Optional[Callable[[Observation], None]] = None
-        self._on_trigger: Optional[Callable[[Trigger, FusionResult], None]] = None
+        self._on_trigger: Optional[Callable[[Trigger, Observation], None]] = None
 
         # Stats
         self._frames_processed: int = 0
@@ -128,7 +128,7 @@ class MomentDetector:
         video_path: str,
         fps: int = 10,
         resolution: Optional[tuple[int, int]] = None,
-    ) -> Iterator[tuple[Frame, Optional[FusionResult]]]:
+    ) -> Iterator[tuple[Frame, Optional[Observation]]]:
         """Process video as a stream, yielding frames and fusion results.
 
         This is useful for real-time visualization and debugging.
@@ -140,7 +140,7 @@ class MomentDetector:
 
         Yields:
             Tuple of (frame, fusion_result). fusion_result is None if
-            no observation was produced, or FusionResult from fusion.
+            no observation was produced, or Observation from fusion.
         """
         # Initialize extractors
         for ext in self._extractors:
@@ -185,7 +185,7 @@ class MomentDetector:
         self._on_observation = callback
 
     def set_on_trigger(
-        self, callback: Callable[[Trigger, FusionResult], None]
+        self, callback: Callable[[Trigger, Observation], None]
     ) -> None:
         """Set callback for each trigger."""
         self._on_trigger = callback

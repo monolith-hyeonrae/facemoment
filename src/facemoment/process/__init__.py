@@ -61,10 +61,14 @@ from facemoment.process.mappers import (
 )
 
 # Re-export base types for convenience
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion, FusionResult
+from visualpath.core.module import Module
+from visualpath.core.extractor import Observation
 from visualbase.ipc.interfaces import VideoReader, MessageSender, MessageReceiver
 from visualbase import Frame
+
+# Backwards compatibility aliases
+BaseExtractor = Module
+BaseFusion = Module
 
 
 def create_extractor_process(
@@ -130,7 +134,7 @@ def create_fusion_process(
     trig_socket: Optional[str] = None,
     message_transport: str = "uds",
     alignment_window_ns: int = ALIGNMENT_WINDOW_NS,
-    on_trigger: Optional[Callable[[FusionResult], None]] = None,
+    on_trigger: Optional[Callable[[Observation], None]] = None,
 ) -> FusionProcess:
     """Create a FusionProcess with facemoment-specific mapper.
 

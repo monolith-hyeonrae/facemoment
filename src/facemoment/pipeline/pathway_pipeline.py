@@ -402,10 +402,17 @@ class FacemomentPipeline:
                     # Composite "face" extractor satisfies "face_detect" dependency
                     if "face_detect" in ext.depends and "face_detect" not in extractor_deps and "face" in deps:
                         extractor_deps["face"] = deps["face"]
-                try:
-                    obs = ext.extract(frame, extractor_deps)
-                except TypeError:
-                    obs = ext.extract(frame)
+                # Support both Module.process() and BaseExtractor.extract()
+                if hasattr(ext, 'process') and not hasattr(ext, 'extract'):
+                    try:
+                        obs = ext.process(frame, extractor_deps)
+                    except TypeError:
+                        obs = ext.process(frame)
+                else:
+                    try:
+                        obs = ext.extract(frame, extractor_deps)
+                    except TypeError:
+                        obs = ext.extract(frame)
 
                 if obs is not None:
                     observations.append(obs)

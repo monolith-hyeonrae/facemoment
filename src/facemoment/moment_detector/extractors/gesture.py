@@ -9,10 +9,11 @@ import numpy as np
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
 )
 from facemoment.moment_detector.extractors.types import GestureType, HandLandmarkIndex
+from facemoment.moment_detector.extractors.outputs import GestureOutput
 from facemoment.moment_detector.extractors.backends.base import (
     HandLandmarkBackend,
     HandLandmarks,
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 _hub = ObservabilityHub.get_instance()
 
 
-class GestureExtractor(BaseExtractor):
+class GestureExtractor(Module):
     """Extractor for hand gesture recognition using MediaPipe Hands.
 
     Detects specific hand gestures useful for gokart scenario:
@@ -51,7 +52,7 @@ class GestureExtractor(BaseExtractor):
     Example:
         >>> extractor = GestureExtractor()
         >>> with extractor:
-        ...     obs = extractor.extract(frame)
+        ...     obs = extractor.process(frame)
         ...     if obs.signals.get("gesture_detected", 0) > 0:
         ...         print(f"Gesture: {obs.metadata.get('gesture_type')}")
     """
@@ -95,11 +96,12 @@ class GestureExtractor(BaseExtractor):
         self._initialized = False
         logger.info("GestureExtractor cleaned up")
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
         """Extract gesture observations from a frame.
 
         Args:
             frame: Input frame to analyze.
+            deps: Not used (no dependencies).
 
         Returns:
             Observation with gesture signals.
@@ -130,6 +132,7 @@ class GestureExtractor(BaseExtractor):
                     "gesture_detected": 0.0,
                     "gesture_confidence": 0.0,
                 },
+                data=GestureOutput(gestures=[], hand_landmarks=[]),
                 metadata={
                     "gesture_type": "",
                     "hands_detected": 0,
@@ -189,11 +192,28 @@ class GestureExtractor(BaseExtractor):
                 signals,
             )
 
+        # Build hand landmarks data for visualization
+        h, w = image.shape[:2]
+        hand_landmarks_data = []
+        for i, hand in enumerate(hands):
+            hand_landmarks_data.append({
+                "handedness": hand.handedness,
+                "landmarks": hand.landmarks.tolist(),  # (21, 3) array
+                "confidence": hand.confidence,
+                "gesture": all_gestures[i]["gesture"] if i < len(all_gestures) else "",
+                "gesture_confidence": all_gestures[i]["confidence"] if i < len(all_gestures) else 0.0,
+                "image_size": (w, h),
+            })
+
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
             t_ns=t_ns,
             signals=signals,
+            data=GestureOutput(
+                gestures=[g["gesture"] for g in all_gestures],
+                hand_landmarks=hand_landmarks_data,
+            ),
             metadata={
                 "gesture_type": best_gesture.value if gesture_detected else "",
                 "hands_detected": len(hands),

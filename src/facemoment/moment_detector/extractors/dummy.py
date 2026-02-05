@@ -6,13 +6,13 @@ from typing import Optional
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
     FaceObservation,
 )
 
 
-class DummyExtractor(BaseExtractor):
+class DummyExtractor(Module):
     """Dummy extractor that generates random observations for testing.
 
     This extractor simulates face detection with configurable behavior.
@@ -26,7 +26,7 @@ class DummyExtractor(BaseExtractor):
 
     Example:
         >>> extractor = DummyExtractor(num_faces=2, spike_probability=0.2)
-        >>> obs = extractor.extract(frame)
+        >>> obs = extractor.process(frame)
         >>> print(f"Detected {len(obs.faces)} faces")
     """
 
@@ -46,7 +46,7 @@ class DummyExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
         """Generate dummy observation with random values."""
         faces = []
 

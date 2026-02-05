@@ -215,7 +215,7 @@ class TestHighlightFusion:
             result = fusion.update(obs)
             if result.should_trigger:
                 triggered = True
-                assert result.reason == "expression_spike"
+                assert result.trigger_reason == "expression_spike"
                 break
 
         assert triggered
@@ -246,7 +246,7 @@ class TestHighlightFusion:
             result = fusion.update(obs)
             if result.should_trigger:
                 triggered = True
-                assert result.reason == "hand_wave"
+                assert result.trigger_reason == "hand_wave"
                 break
 
         assert triggered
@@ -377,8 +377,8 @@ class TestHighlightFusion:
         assert result.should_trigger
         assert result.trigger is not None
         assert result.trigger.label == "highlight"
-        assert result.score > 0
-        assert result.reason in ["expression_spike", "head_turn", "hand_wave"]
+        assert result.trigger_score > 0
+        assert result.trigger_reason in ["expression_spike", "head_turn", "hand_wave"]
 
     def test_gate_hysteresis_prevents_flapping(self):
         """Test gate hysteresis prevents rapid open/close cycles."""
@@ -441,7 +441,7 @@ class TestHighlightFusion:
                 yaw=(i - 10) * 2.0,  # 2 degrees per frame
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "head_turn":
+            if result.should_trigger and result.trigger_reason == "head_turn":
                 triggered = True
                 break
 
@@ -483,7 +483,7 @@ class TestHighlightFusionPhase9:
                 pitch=3.0,
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "camera_gaze":
+            if result.should_trigger and result.trigger_reason == "camera_gaze":
                 triggered = True
                 break
 
@@ -511,7 +511,7 @@ class TestHighlightFusionPhase9:
                 pitch=0.0,
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "camera_gaze":
+            if result.should_trigger and result.trigger_reason == "camera_gaze":
                 camera_gaze_triggered = True
 
         assert not camera_gaze_triggered
@@ -589,7 +589,7 @@ class TestHighlightFusionPhase9:
                 right_yaw=-25.0,  # Right person looking left
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "passenger_interaction":
+            if result.should_trigger and result.trigger_reason == "passenger_interaction":
                 triggered = True
                 break
 
@@ -613,7 +613,7 @@ class TestHighlightFusionPhase9:
                 face_count=1,
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "passenger_interaction":
+            if result.should_trigger and result.trigger_reason == "passenger_interaction":
                 triggered_interaction = True
 
         assert not triggered_interaction
@@ -677,7 +677,7 @@ class TestHighlightFusionPhase9:
                 gesture_confidence=0.9,
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "gesture_vsign":
+            if result.should_trigger and result.trigger_reason == "gesture_vsign":
                 triggered = True
                 break
 
@@ -742,7 +742,7 @@ class TestHighlightFusionPhase9:
                 gesture_confidence=0.9,
             )
             result = fusion.update(obs)
-            if result.should_trigger and result.reason == "gesture_thumbsup":
+            if result.should_trigger and result.trigger_reason == "gesture_thumbsup":
                 triggered = True
                 break
 

@@ -14,7 +14,6 @@ import cv2
 import numpy as np
 
 from facemoment.moment_detector.extractors.base import Observation
-from facemoment.moment_detector.fusion.base import FusionResult
 from facemoment.moment_detector.visualize.components import (
     COLOR_DARK_BGR,
     COLOR_WHITE_BGR,
@@ -59,7 +58,7 @@ class TimelinePanel:
     def update(
         self,
         face_obs: Optional[Observation],
-        fusion_result: Optional[FusionResult],
+        fusion_result: Optional[Observation],
         is_gate_open: bool,
     ) -> None:
         """Record one frame's data into the history."""

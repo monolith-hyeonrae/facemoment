@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
-from facemoment.moment_detector.fusion.base import FusionResult
 from facemoment.moment_detector.visualize.components import (
     COLOR_DARK_BGR,
     COLOR_WHITE_BGR,
@@ -60,7 +59,7 @@ class StatsPanel:
         region: Tuple[int, int, int, int],
         face_obs: Optional[Observation] = None,
         classifier_obs: Optional[Observation] = None,
-        fusion_result: Optional[FusionResult] = None,
+        fusion_result: Optional[Observation] = None,
         is_gate_open: bool = False,
         in_cooldown: bool = False,
         profile_timing: Optional[Dict[str, float]] = None,
@@ -129,7 +128,7 @@ class StatsPanel:
         # Capture and draw trigger thumbnails (skip if TRIGGER layer is off)
         if layers is None or layers[DebugLayer.TRIGGER]:
             if fusion_result and fusion_result.should_trigger:
-                self._capture_thumbnail(source_image, face_obs, fusion_result.reason)
+                self._capture_thumbnail(source_image, face_obs, fusion_result.trigger_reason)
             self._draw_thumbnails(canvas, rx1, y + 5, rx2)
 
     def _draw_monitor_stats(
@@ -293,7 +292,7 @@ class StatsPanel:
         canvas: np.ndarray,
         x: int,
         y: int,
-        result: FusionResult,
+        result: Observation,
         face_obs: Optional[Observation],
     ) -> int:
         """Draw adaptive fusion info (spike bar, baseline)."""

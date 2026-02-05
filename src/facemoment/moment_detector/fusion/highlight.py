@@ -8,7 +8,7 @@ import logging
 from visualbase import Trigger
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
-from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.moment_detector.fusion.base import Module
 from facemoment.moment_detector.extractors.face_classifier import FaceClassifierOutput
 from facemoment.observability import ObservabilityHub, TraceLevel
 from facemoment.observability.records import (
@@ -65,12 +65,14 @@ class AdaptiveEmotionState:
         return self.recent - self.baseline
 
 
-class HighlightFusion(BaseFusion):
+class HighlightFusion(Module):
     """Fusion module for detecting highlight-worthy moments.
 
     Combines signals from face, pose, and quality extractors to
     identify moments worth capturing. Uses a quality gate with
     hysteresis and detects various trigger events.
+
+    depends: ["face", "expression", "face_classifier"] (optional)
 
     Trigger Types:
     - expression_spike: Sudden increase in facial expression
@@ -109,10 +111,13 @@ class HighlightFusion(BaseFusion):
     Example:
         >>> fusion = HighlightFusion()
         >>> for obs in observations:
-        ...     result = fusion.update(obs)
+        ...     result = fusion.process(frame, {"face": obs})
         ...     if result.should_trigger:
         ...         print(f"Trigger: {result.reason}, score={result.score:.2f}")
     """
+
+    # Dependency declaration - uses observations from these modules
+    depends = ["face", "expression", "face_classifier"]
 
     def __init__(
         self,
@@ -227,7 +232,7 @@ class HighlightFusion(BaseFusion):
         self,
         observation: Observation,
         classifier_obs: Optional[Observation] = None,
-    ) -> FusionResult:
+    ) -> Observation:
         """Process observation and decide on trigger.
 
         Args:
@@ -235,7 +240,7 @@ class HighlightFusion(BaseFusion):
             classifier_obs: Optional face classifier observation for main-only mode.
 
         Returns:
-            FusionResult indicating trigger decision.
+            Observation with trigger info in signals/metadata.
         """
         self._recent_observations.append(observation)
         self._observation_count += 1
@@ -258,9 +263,17 @@ class HighlightFusion(BaseFusion):
                     consecutive_required=self._consecutive_required,
                     decision="blocked_cooldown",
                 ))
-            return FusionResult(
-                should_trigger=False,
-                observations_used=self._observation_count,
+            return Observation(
+                source=self.name,
+                frame_id=observation.frame_id,
+                t_ns=t_ns,
+                signals={
+                    "should_trigger": False,
+                    "trigger_score": 0.0,
+                    "trigger_reason": "",
+                    "observations_used": self._observation_count,
+                },
+                faces=observation.faces,
                 metadata={"state": "cooldown", "adaptive_summary": self.get_adaptive_summary()},
             )
 
@@ -282,9 +295,17 @@ class HighlightFusion(BaseFusion):
                     consecutive_required=self._consecutive_required,
                     decision="blocked_gate",
                 ))
-            return FusionResult(
-                should_trigger=False,
-                observations_used=self._observation_count,
+            return Observation(
+                source=self.name,
+                frame_id=observation.frame_id,
+                t_ns=t_ns,
+                signals={
+                    "should_trigger": False,
+                    "trigger_score": 0.0,
+                    "trigger_reason": "",
+                    "observations_used": self._observation_count,
+                },
+                faces=observation.faces,
                 metadata={
                     "state": "gate_closed",
                     "conditions_met": gate_conditions_met,
@@ -412,13 +433,19 @@ class HighlightFusion(BaseFusion):
                     consecutive_frames=self._consecutive_required,
                 ))
 
-            return FusionResult(
-                should_trigger=True,
-                trigger=trigger,
-                score=score,
-                reason=reason,
-                observations_used=self._observation_count,
+            return Observation(
+                source=self.name,
+                frame_id=observation.frame_id,
+                t_ns=t_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": score,
+                    "trigger_reason": reason,
+                    "observations_used": self._observation_count,
+                },
+                faces=observation.faces,
                 metadata={
+                    "trigger": trigger,
                     "consecutive_frames": self._consecutive_required,
                     "adaptive_summary": self.get_adaptive_summary(),
                 },
@@ -444,9 +471,17 @@ class HighlightFusion(BaseFusion):
                     if _hub.is_level_enabled(TraceLevel.VERBOSE) else {},
             ))
 
-        return FusionResult(
-            should_trigger=False,
-            observations_used=self._observation_count,
+        return Observation(
+            source=self.name,
+            frame_id=observation.frame_id,
+            t_ns=t_ns,
+            signals={
+                "should_trigger": False,
+                "trigger_score": 0.0,
+                "trigger_reason": "",
+                "observations_used": self._observation_count,
+            },
+            faces=observation.faces,
             metadata={
                 "state": "monitoring",
                 "gate_open": self._gate_open,
@@ -935,6 +970,60 @@ class HighlightFusion(BaseFusion):
     def reset(self) -> None:
         """Reset fusion state."""
         self._reset_state()
+
+    @property
+    def name(self) -> str:
+        """Module name."""
+        return "highlight"
+
+    @property
+    def is_trigger(self) -> bool:
+        """This is a trigger module."""
+        return True
+
+    def process(self, frame, deps=None) -> Observation:
+        """Process observations and decide on trigger (Module API).
+
+        This is the unified Module interface. It extracts observations
+        from deps and delegates to update().
+
+        Args:
+            frame: Current frame (used for timing if no observations).
+            deps: Dict of observations from dependency modules.
+                  Expected keys: "face", "expression", "face_classifier"
+
+        Returns:
+            Observation with trigger info in signals/metadata.
+        """
+        if not deps:
+            return Observation(
+                source=self.name,
+                frame_id=getattr(frame, 'frame_id', 0),
+                t_ns=getattr(frame, 't_src_ns', 0),
+                signals={"should_trigger": False, "trigger_score": 0.0, "trigger_reason": ""},
+            )
+
+        # Get main observation (prefer "face" or "expression")
+        observation = deps.get("face") or deps.get("expression")
+        if observation is None:
+            # Try any observation with faces
+            for obs in deps.values():
+                if hasattr(obs, 'faces') or hasattr(obs, 'signals'):
+                    observation = obs
+                    break
+
+        if observation is None:
+            return Observation(
+                source=self.name,
+                frame_id=getattr(frame, 'frame_id', 0),
+                t_ns=getattr(frame, 't_src_ns', 0),
+                signals={"should_trigger": False, "trigger_score": 0.0, "trigger_reason": ""},
+            )
+
+        # Get classifier observation if available
+        classifier_obs = deps.get("face_classifier")
+
+        return self.update(observation, classifier_obs)
 
     @property
     def is_gate_open(self) -> bool:

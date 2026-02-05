@@ -9,7 +9,6 @@ import numpy as np
 from visualbase import Frame, FrameViewer
 from facemoment.moment_detector import MomentDetector
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
-from facemoment.moment_detector.fusion.base import FusionResult
 
 
 class DetectorVisualizer:
@@ -41,7 +40,7 @@ class DetectorVisualizer:
     def show(
         self,
         frame: Frame,
-        fusion_result: Optional[FusionResult] = None,
+        fusion_result: Optional[Observation] = None,
         observation: Optional[Observation] = None,
         wait_ms: int = 1,
     ) -> bool:
@@ -49,7 +48,7 @@ class DetectorVisualizer:
 
         Args:
             frame: Video frame to display.
-            fusion_result: Result from fusion module.
+            fusion_result: Observation result from fusion module.
             observation: Observation from extractor (if available).
             wait_ms: Wait time for key press.
 
@@ -73,7 +72,7 @@ class DetectorVisualizer:
         self,
         image: np.ndarray,
         frame: Frame,
-        fusion_result: Optional[FusionResult],
+        fusion_result: Optional[Observation],
     ) -> np.ndarray:
         """Draw all visualization overlays."""
         h, w = image.shape[:2]
@@ -198,7 +197,7 @@ class DetectorVisualizer:
             )
             y_offset += 18
 
-    def _draw_fusion_status(self, image: np.ndarray, result: FusionResult) -> None:
+    def _draw_fusion_status(self, image: np.ndarray, result: Observation) -> None:
         """Draw fusion module status."""
         h, w = image.shape[:2]
 
@@ -215,7 +214,7 @@ class DetectorVisualizer:
             status_text = "GATE CLOSED"
             status_color = (128, 128, 128)
         elif result.should_trigger:
-            status_text = f"TRIGGER! Score: {result.score:.2f}"
+            status_text = f"TRIGGER! Score: {result.trigger_score:.2f}"
             status_color = (0, 255, 0)
         else:
             consec = result.metadata.get("consecutive_high", 0)

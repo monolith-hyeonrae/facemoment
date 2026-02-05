@@ -13,9 +13,8 @@ import cv2
 import numpy as np
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
-from facemoment.moment_detector.extractors.types import KeypointIndex
-from facemoment.moment_detector.extractors.outputs import PoseOutput
-from facemoment.moment_detector.fusion.base import FusionResult
+from facemoment.moment_detector.extractors.types import KeypointIndex, HandLandmarkIndex
+from facemoment.moment_detector.extractors.outputs import PoseOutput, GestureOutput
 from facemoment.moment_detector.visualize.components import (
     COLOR_DARK_BGR,
     COLOR_WHITE_BGR,
@@ -44,8 +43,9 @@ class VideoPanel:
         image: np.ndarray,
         face_obs: Optional[Observation] = None,
         pose_obs: Optional[Observation] = None,
+        gesture_obs: Optional[Observation] = None,
         classifier_obs: Optional[Observation] = None,
-        fusion_result: Optional[FusionResult] = None,
+        fusion_result: Optional[Observation] = None,
         roi: Optional[Tuple[float, float, float, float]] = None,
         layers: Optional[LayerState] = None,
     ) -> np.ndarray:
@@ -55,6 +55,7 @@ class VideoPanel:
             image: Video frame (will be copied).
             face_obs: Face detection observation.
             pose_obs: Pose observation.
+            gesture_obs: Gesture observation (hand landmarks).
             classifier_obs: Face classifier observation (role-based colors).
             fusion_result: Fusion result (for trigger flash).
             roi: ROI boundary in normalized coordinates (x1, y1, x2, y2).
@@ -70,6 +71,9 @@ class VideoPanel:
 
         if pose_obs is not None and (layers is None or layers[DebugLayer.POSE]):
             self._draw_pose(output, pose_obs)
+
+        if gesture_obs is not None and (layers is None or layers[DebugLayer.GESTURE]):
+            self._draw_gesture(output, gesture_obs)
 
         if layers is None or layers[DebugLayer.FACE]:
             if classifier_obs is not None:
@@ -258,6 +262,126 @@ class VideoPanel:
             cv2.circle(image, pt, radius, color, -1)
             cv2.circle(image, pt, radius, COLOR_DARK_BGR, 1)
 
+    # --- Gesture annotations ---
+
+    # Gesture colors
+    COLOR_GESTURE_BGR = (255, 128, 0)  # Orange for hand landmarks
+    COLOR_GESTURE_LINE_BGR = (200, 100, 0)  # Darker orange for connections
+
+    def _draw_gesture(self, image: np.ndarray, obs: Observation) -> None:
+        """Draw hand landmarks and gesture labels."""
+        h, w = image.shape[:2]
+        if obs.data is None:
+            return
+
+        # Support both GestureOutput (attribute access) and dict (serialized)
+        if hasattr(obs.data, "hand_landmarks"):
+            hand_landmarks = obs.data.hand_landmarks
+        elif isinstance(obs.data, dict) and "hand_landmarks" in obs.data:
+            hand_landmarks = obs.data["hand_landmarks"]
+        else:
+            return
+
+        for hand in hand_landmarks:
+            self._draw_hand_landmarks(image, hand, w, h)
+
+    def _draw_hand_landmarks(
+        self, image: np.ndarray, hand: Dict, w: int, h: int
+    ) -> None:
+        """Draw 21 hand landmarks and connections for a single hand."""
+        landmarks = hand.get("landmarks", [])
+        if not landmarks or len(landmarks) < 21:
+            return
+
+        handedness = hand.get("handedness", "")
+        gesture = hand.get("gesture", "")
+        gesture_conf = hand.get("gesture_confidence", 0.0)
+
+        # MediaPipe hand connections
+        connections = [
+            # Thumb
+            (HandLandmarkIndex.WRIST, HandLandmarkIndex.THUMB_CMC),
+            (HandLandmarkIndex.THUMB_CMC, HandLandmarkIndex.THUMB_MCP),
+            (HandLandmarkIndex.THUMB_MCP, HandLandmarkIndex.THUMB_IP),
+            (HandLandmarkIndex.THUMB_IP, HandLandmarkIndex.THUMB_TIP),
+            # Index finger
+            (HandLandmarkIndex.WRIST, HandLandmarkIndex.INDEX_FINGER_MCP),
+            (HandLandmarkIndex.INDEX_FINGER_MCP, HandLandmarkIndex.INDEX_FINGER_PIP),
+            (HandLandmarkIndex.INDEX_FINGER_PIP, HandLandmarkIndex.INDEX_FINGER_DIP),
+            (HandLandmarkIndex.INDEX_FINGER_DIP, HandLandmarkIndex.INDEX_FINGER_TIP),
+            # Middle finger
+            (HandLandmarkIndex.WRIST, HandLandmarkIndex.MIDDLE_FINGER_MCP),
+            (HandLandmarkIndex.MIDDLE_FINGER_MCP, HandLandmarkIndex.MIDDLE_FINGER_PIP),
+            (HandLandmarkIndex.MIDDLE_FINGER_PIP, HandLandmarkIndex.MIDDLE_FINGER_DIP),
+            (HandLandmarkIndex.MIDDLE_FINGER_DIP, HandLandmarkIndex.MIDDLE_FINGER_TIP),
+            # Ring finger
+            (HandLandmarkIndex.WRIST, HandLandmarkIndex.RING_FINGER_MCP),
+            (HandLandmarkIndex.RING_FINGER_MCP, HandLandmarkIndex.RING_FINGER_PIP),
+            (HandLandmarkIndex.RING_FINGER_PIP, HandLandmarkIndex.RING_FINGER_DIP),
+            (HandLandmarkIndex.RING_FINGER_DIP, HandLandmarkIndex.RING_FINGER_TIP),
+            # Pinky
+            (HandLandmarkIndex.WRIST, HandLandmarkIndex.PINKY_MCP),
+            (HandLandmarkIndex.PINKY_MCP, HandLandmarkIndex.PINKY_PIP),
+            (HandLandmarkIndex.PINKY_PIP, HandLandmarkIndex.PINKY_DIP),
+            (HandLandmarkIndex.PINKY_DIP, HandLandmarkIndex.PINKY_TIP),
+            # Palm connections
+            (HandLandmarkIndex.INDEX_FINGER_MCP, HandLandmarkIndex.MIDDLE_FINGER_MCP),
+            (HandLandmarkIndex.MIDDLE_FINGER_MCP, HandLandmarkIndex.RING_FINGER_MCP),
+            (HandLandmarkIndex.RING_FINGER_MCP, HandLandmarkIndex.PINKY_MCP),
+        ]
+
+        # Draw connections
+        for idx1, idx2 in connections:
+            if idx1 >= len(landmarks) or idx2 >= len(landmarks):
+                continue
+            lm1, lm2 = landmarks[idx1], landmarks[idx2]
+            pt1 = (int(lm1[0] * w), int(lm1[1] * h))
+            pt2 = (int(lm2[0] * w), int(lm2[1] * h))
+            cv2.line(image, pt1, pt2, self.COLOR_GESTURE_LINE_BGR, 2)
+
+        # Draw landmarks
+        for i, lm in enumerate(landmarks):
+            pt = (int(lm[0] * w), int(lm[1] * h))
+            # Fingertips are larger
+            if i in (
+                HandLandmarkIndex.THUMB_TIP,
+                HandLandmarkIndex.INDEX_FINGER_TIP,
+                HandLandmarkIndex.MIDDLE_FINGER_TIP,
+                HandLandmarkIndex.RING_FINGER_TIP,
+                HandLandmarkIndex.PINKY_TIP,
+            ):
+                radius = 6
+            elif i == HandLandmarkIndex.WRIST:
+                radius = 5
+            else:
+                radius = 3
+            cv2.circle(image, pt, radius, self.COLOR_GESTURE_BGR, -1)
+            cv2.circle(image, pt, radius, COLOR_DARK_BGR, 1)
+
+        # Draw gesture label near wrist
+        if landmarks:
+            wrist = landmarks[HandLandmarkIndex.WRIST]
+            label_x = int(wrist[0] * w)
+            label_y = int(wrist[1] * h) + 20
+
+            # Handedness + gesture
+            if gesture and gesture != "none":
+                label = f"{handedness[0]}:{gesture} ({gesture_conf:.2f})"
+                color = COLOR_GREEN_BGR
+            else:
+                label = f"{handedness[0]}: --"
+                color = self.COLOR_GESTURE_BGR
+
+            # Background for readability
+            label_size = cv2.getTextSize(label, FONT, 0.5, 1)[0]
+            cv2.rectangle(
+                image,
+                (label_x - 2, label_y - label_size[1] - 4),
+                (label_x + label_size[0] + 4, label_y + 4),
+                COLOR_DARK_BGR, -1,
+            )
+            cv2.putText(image, label, (label_x, label_y), FONT, 0.5, color, 1)
+
     # --- ROI ---
 
     def _draw_roi(self, image: np.ndarray, roi: Tuple[float, float, float, float]) -> None:
@@ -270,12 +394,12 @@ class VideoPanel:
 
     # --- Trigger flash ---
 
-    def _draw_trigger_flash(self, image: np.ndarray, result: FusionResult) -> None:
+    def _draw_trigger_flash(self, image: np.ndarray, result: Observation) -> None:
         """Draw trigger flash border and text."""
         h, w = image.shape[:2]
         cv2.rectangle(image, (0, 0), (w - 1, h - 1), COLOR_RED_BGR, 10)
         cv2.putText(
-            image, f"TRIGGER: {result.reason}",
+            image, f"TRIGGER: {result.trigger_reason}",
             (w // 2 - 100, h // 2),
             FONT, 1.0, COLOR_RED_BGR, 3,
         )

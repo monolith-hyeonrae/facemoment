@@ -53,7 +53,7 @@ from visualpath.process import (
 from visualpath.plugin import create_extractor, load_fusion
 
 from facemoment.pipeline.config import ExtractorConfig, FusionConfig, PipelineConfig
-from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.moment_detector.fusion.base import BaseFusion
 from facemoment.moment_detector.extractors.base import Observation
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ class PipelineOrchestrator:
         # Callbacks
         self._on_frame: Optional[Callable[[Frame], None]] = None
         self._on_observations: Optional[Callable[[List[Observation]], None]] = None
-        self._on_trigger: Optional[Callable[[Trigger, FusionResult], None]] = None
+        self._on_trigger: Optional[Callable[[Trigger, Observation], None]] = None
 
         # Stats
         self._stats = PipelineStats()
@@ -430,13 +430,19 @@ class PipelineOrchestrator:
 
                 # Callback
                 if self._on_trigger:
-                    from facemoment.moment_detector.fusion.base import FusionResult
-                    result = FusionResult(
-                        should_trigger=True,
-                        trigger=trigger,
-                        score=trigger.score,
+                    # Create Observation with trigger info for callback
+                    obs = Observation(
+                        source="pathway",
+                        frame_id=0,
+                        t_ns=trigger.event_time_ns,
+                        signals={
+                            "should_trigger": True,
+                            "trigger_score": trigger.score,
+                            "trigger_reason": trigger.label,
+                        },
+                        metadata={"trigger": trigger},
                     )
-                    self._on_trigger(trigger, result)
+                    self._on_trigger(trigger, obs)
 
                 # Extract clip
                 clip_result = self._vb.trigger(trigger)
@@ -569,7 +575,7 @@ class PipelineOrchestrator:
         video_path: str,
         fps: int = 10,
         resolution: Optional[Tuple[int, int]] = None,
-    ) -> Iterator[Tuple[Frame, List[Observation], Optional[FusionResult]]]:
+    ) -> Iterator[Tuple[Frame, List[Observation], Optional[Observation]]]:
         """Run pipeline as a stream, yielding results for each frame.
 
         Useful for real-time visualization and debugging.
@@ -653,12 +659,12 @@ class PipelineOrchestrator:
         self._on_observations = callback
 
     def set_on_trigger(
-        self, callback: Callable[[Trigger, FusionResult], None]
+        self, callback: Callable[[Trigger, Observation], None]
     ) -> None:
         """Set callback for each trigger event.
 
         Args:
-            callback: Function called with trigger and fusion result.
+            callback: Function called with trigger and observation result.
         """
         self._on_trigger = callback
 

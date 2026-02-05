@@ -18,7 +18,6 @@ from facemoment.pipeline import (
     create_default_config,
 )
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
-from facemoment.moment_detector.fusion.base import FusionResult
 from visualpath.core import IsolationLevel
 
 

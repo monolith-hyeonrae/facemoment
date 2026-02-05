@@ -1,15 +1,23 @@
-"""Base extractor interface for feature extraction (B modules).
+"""Base module interface for feature extraction (B modules).
 
 This module re-exports the base classes from visualpath and provides
 facemoment-specific observation types.
+
+Usage:
+    Inherit from Module and implement process():
+    - Return Observation from process()
+    - For trigger modules, set signals["should_trigger"] = True
 """
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 
-# Re-export BaseExtractor from visualpath
-from visualpath.core.extractor import BaseExtractor
+# Re-export Module from visualpath
+from visualpath.core.module import Module
 from visualpath.core.isolation import IsolationLevel
+
+# Backwards compatibility alias
+BaseExtractor = Module
 
 # Re-export for backward compatibility
 from visualbase import Frame  # noqa: F401
@@ -56,6 +64,12 @@ class Observation:
     This is a facemoment-specific Observation that includes face-specific
     fields. It is compatible with visualpath's generic Observation interface.
 
+    For trigger modules, set trigger info in signals:
+    - signals["should_trigger"]: Whether to fire a trigger
+    - signals["trigger_score"]: Confidence score [0, 1]
+    - signals["trigger_reason"]: Reason for the trigger
+    - metadata["trigger"]: Trigger object
+
     Attributes:
         source: Name of the extractor that produced this observation.
         frame_id: Frame identifier from the source video.
@@ -70,15 +84,49 @@ class Observation:
     source: str
     frame_id: int
     t_ns: int
-    signals: Dict[str, float] = field(default_factory=dict)
+    signals: Dict[str, Any] = field(default_factory=dict)
     data: Optional[Any] = None  # Type-safe output (PoseOutput, FaceDetectOutput, etc.)
     faces: List[FaceObservation] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     timing: Optional[Dict[str, float]] = None  # {"detect_ms": 42.3, "expression_ms": 28.1}
 
+    # Trigger helper properties (matches visualpath.core.Observation)
+
+    @property
+    def should_trigger(self) -> bool:
+        """Check if this observation indicates a trigger should fire."""
+        return bool(self.signals.get("should_trigger", False))
+
+    @property
+    def trigger_score(self) -> float:
+        """Get the trigger confidence score."""
+        return float(self.signals.get("trigger_score", 0.0))
+
+    @property
+    def trigger_reason(self) -> str:
+        """Get the trigger reason."""
+        return str(self.signals.get("trigger_reason", ""))
+
+    @property
+    def trigger(self) -> Optional[Any]:
+        """Get the Trigger object if present."""
+        return self.metadata.get("trigger")
+
+    # Backwards-compatible aliases
+    @property
+    def score(self) -> float:
+        """Alias for trigger_score."""
+        return self.trigger_score
+
+    @property
+    def reason(self) -> str:
+        """Alias for trigger_reason."""
+        return self.trigger_reason
+
 
 __all__ = [
-    "BaseExtractor",
+    "Module",
+    "BaseExtractor",  # Alias for Module
     "Observation",
     "FaceObservation",
     "IsolationLevel",

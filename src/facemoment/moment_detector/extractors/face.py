@@ -9,7 +9,7 @@ import numpy as np
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
     FaceObservation,
 )
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _hub = ObservabilityHub.get_instance()
 
 
-class FaceExtractor(BaseExtractor):
+class FaceExtractor(Module):
     """Extractor for face detection and expression analysis.
 
     Uses pluggable backends for face detection and expression analysis,
@@ -50,7 +50,7 @@ class FaceExtractor(BaseExtractor):
     Example:
         >>> extractor = FaceExtractor()
         >>> with extractor:
-        ...     obs = extractor.extract(frame)
+        ...     obs = extractor.process(frame)
         ...     for face in obs.faces:
         ...         print(f"Face {face.face_id}: expression={face.expression:.2f}")
     """
@@ -79,9 +79,8 @@ class FaceExtractor(BaseExtractor):
         self._device = device
         self._track_faces = track_faces
         self._iou_threshold = iou_threshold
-        # ROI default: wider to include passengers on both sides
-        # Old: (0.3, 0.1, 0.7, 0.6) - too narrow for two-person scenarios
-        self._roi = roi if roi is not None else (0.1, 0.05, 0.9, 0.75)
+        # ROI default: matches debug session default for consistency
+        self._roi = roi if roi is not None else (0.3, 0.1, 0.7, 0.6)
         self._initialized = False
 
         # Lazy import backends to avoid import errors when dependencies missing
@@ -213,7 +212,7 @@ class FaceExtractor(BaseExtractor):
 
         logger.info("FaceExtractor cleaned up")
 
-    def extract(
+    def process(
         self,
         frame: Frame,
         deps: Optional[Dict[str, "Observation"]] = None,

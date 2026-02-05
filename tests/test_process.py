@@ -19,7 +19,7 @@ from facemoment.moment_detector.extractors.base import (
     Observation,
     FaceObservation,
 )
-from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.moment_detector.fusion.base import BaseFusion
 from facemoment.process import (
     ExtractorProcess,
     FusionProcess,
@@ -39,7 +39,7 @@ class MockExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame: Frame):
+    def process(self, frame: Frame, deps=None):
         self._call_count += 1
         if self._name == "face":
             return Observation(
@@ -173,19 +173,31 @@ class MockFusion(BaseFusion):
     """Mock fusion for testing."""
 
     def __init__(self):
+        self._name = "mock_fusion"
         self._observations = []
         self._gate_open = True
         self._in_cooldown = False
 
-    def update(self, observation: Observation) -> FusionResult:
-        self._observations.append(observation)
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def process(self, frame, deps=None) -> Observation:
+        t_ns = getattr(frame, "t_src_ns", 0)
+        frame_id = getattr(frame, "frame_id", 0)
+
+        self._observations.append(frame_id)
         # Trigger every 5th observation
         should_trigger = len(self._observations) % 5 == 0
-        return FusionResult(
-            should_trigger=should_trigger,
-            trigger=None,  # Would need actual Trigger for real test
-            score=0.8 if should_trigger else 0.0,
-            reason="test_trigger" if should_trigger else "",
+        return Observation(
+            source=self._name,
+            frame_id=frame_id,
+            t_ns=t_ns,
+            signals={
+                "should_trigger": should_trigger,
+                "trigger_score": 0.8 if should_trigger else 0.0,
+                "trigger_reason": "test_trigger" if should_trigger else "",
+            },
         )
 
     def reset(self) -> None:

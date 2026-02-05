@@ -1,15 +1,15 @@
 """Dummy fusion for testing."""
 
-from typing import Optional
+from typing import Optional, Dict, Any
 from collections import deque
 
 from visualbase import Trigger
 
 from facemoment.moment_detector.extractors.base import Observation
-from facemoment.moment_detector.fusion.base import BaseFusion, FusionResult
+from facemoment.moment_detector.fusion.base import Module
 
 
-class DummyFusion(BaseFusion):
+class DummyFusion(Module):
     """Dummy fusion that triggers on high expression values.
 
     Simple rule-based fusion for testing:
@@ -27,10 +27,12 @@ class DummyFusion(BaseFusion):
 
     Example:
         >>> fusion = DummyFusion(expression_threshold=0.8)
-        >>> result = fusion.update(observation)
+        >>> result = fusion.process(frame, {"face": observation})
         >>> if result.should_trigger:
         ...     print(f"Trigger! Score: {result.score}")
     """
+
+    depends = ["face"]
 
     def __init__(
         self,
@@ -55,7 +57,7 @@ class DummyFusion(BaseFusion):
         self._gate_open: bool = False
         self._observation_count: int = 0
 
-    def update(self, observation: Observation, **kwargs) -> FusionResult:
+    def update(self, observation: Observation, **kwargs) -> Observation:
         """Process observation and decide on trigger."""
         self._recent_observations.append(observation)
         self._observation_count += 1
@@ -65,9 +67,17 @@ class DummyFusion(BaseFusion):
         # Check cooldown
         if self._last_trigger_ns is not None:
             if current_t_ns - self._last_trigger_ns < self._cooldown_ns:
-                return FusionResult(
-                    should_trigger=False,
-                    observations_used=self._observation_count,
+                return Observation(
+                    source=self.name,
+                    frame_id=observation.frame_id,
+                    t_ns=current_t_ns,
+                    signals={
+                        "should_trigger": False,
+                        "trigger_score": 0.0,
+                        "trigger_reason": "",
+                        "observations_used": self._observation_count,
+                    },
+                    faces=observation.faces,
                     metadata={"state": "cooldown"},
                 )
 
@@ -75,9 +85,17 @@ class DummyFusion(BaseFusion):
         self._gate_open = self._check_gate(observation)
         if not self._gate_open:
             self._consecutive_high = 0
-            return FusionResult(
-                should_trigger=False,
-                observations_used=self._observation_count,
+            return Observation(
+                source=self.name,
+                frame_id=observation.frame_id,
+                t_ns=current_t_ns,
+                signals={
+                    "should_trigger": False,
+                    "trigger_score": 0.0,
+                    "trigger_reason": "",
+                    "observations_used": self._observation_count,
+                },
+                faces=observation.faces,
                 metadata={"state": "gate_closed"},
             )
 
@@ -115,18 +133,34 @@ class DummyFusion(BaseFusion):
                 },
             )
 
-            return FusionResult(
-                should_trigger=True,
-                trigger=trigger,
-                score=max_expr,
-                reason="expression_spike",
-                observations_used=self._observation_count,
-                metadata={"consecutive_frames": self._consecutive_required},
+            return Observation(
+                source=self.name,
+                frame_id=observation.frame_id,
+                t_ns=current_t_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": max_expr,
+                    "trigger_reason": "expression_spike",
+                    "observations_used": self._observation_count,
+                },
+                faces=observation.faces,
+                metadata={
+                    "trigger": trigger,
+                    "consecutive_frames": self._consecutive_required,
+                },
             )
 
-        return FusionResult(
-            should_trigger=False,
-            observations_used=self._observation_count,
+        return Observation(
+            source=self.name,
+            frame_id=observation.frame_id,
+            t_ns=current_t_ns,
+            signals={
+                "should_trigger": False,
+                "trigger_score": 0.0,
+                "trigger_reason": "",
+                "observations_used": self._observation_count,
+            },
+            faces=observation.faces,
             metadata={
                 "state": "monitoring",
                 "consecutive_high": self._consecutive_high,
@@ -167,6 +201,52 @@ class DummyFusion(BaseFusion):
         self._last_trigger_ns = None
         self._gate_open = False
         self._observation_count = 0
+
+    @property
+    def name(self) -> str:
+        """Module name."""
+        return "dummy_fusion"
+
+    @property
+    def is_trigger(self) -> bool:
+        """This is a trigger module."""
+        return True
+
+    def process(self, frame, deps: Optional[Dict[str, Observation]] = None) -> Observation:
+        """Process observations and decide on trigger (Module API).
+
+        Args:
+            frame: Current frame.
+            deps: Dict of observations from dependency modules.
+
+        Returns:
+            Observation with trigger info in signals/metadata.
+        """
+        if not deps:
+            return Observation(
+                source=self.name,
+                frame_id=getattr(frame, 'frame_id', 0),
+                t_ns=getattr(frame, 't_src_ns', 0),
+                signals={"should_trigger": False, "trigger_score": 0.0, "trigger_reason": ""},
+            )
+
+        # Get observation from deps
+        observation = deps.get("face") or deps.get("dummy")
+        if observation is None:
+            for obs in deps.values():
+                if hasattr(obs, 'signals'):
+                    observation = obs
+                    break
+
+        if observation is None:
+            return Observation(
+                source=self.name,
+                frame_id=getattr(frame, 'frame_id', 0),
+                t_ns=getattr(frame, 't_src_ns', 0),
+                signals={"should_trigger": False, "trigger_score": 0.0, "trigger_reason": ""},
+            )
+
+        return self.update(observation)
 
     @property
     def is_gate_open(self) -> bool:

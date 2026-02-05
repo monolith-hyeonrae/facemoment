@@ -16,7 +16,7 @@ import time
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
     FaceObservation,
 )
@@ -45,7 +45,7 @@ class FaceClassifierOutput:
     noise_count: int = 0
 
 
-class FaceClassifierExtractor(BaseExtractor):
+class FaceClassifierExtractor(Module):
     """Classifies detected faces by their role in the scene.
 
     Uses temporal tracking and spatial analysis to classify faces:
@@ -68,8 +68,8 @@ class FaceClassifierExtractor(BaseExtractor):
         >>> # Use with FlowGraph
         >>> graph = (FlowGraphBuilder()
         ...     .source()
-        ...     .path("detect", extractors=[FaceDetectionExtractor()])
-        ...     .path("classify", extractors=[FaceClassifierExtractor()])
+        ...     .path("detect", modules=[FaceDetectionExtractor()])
+        ...     .path("classify", modules=[FaceClassifierExtractor()])
         ...     .build())
     """
 
@@ -107,7 +107,7 @@ class FaceClassifierExtractor(BaseExtractor):
         self._track_stats.clear()
         logger.info("FaceClassifierExtractor cleaned up")
 
-    def extract(
+    def process(
         self,
         frame: Frame,
         deps: Optional[Dict[str, Observation]] = None,

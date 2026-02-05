@@ -21,7 +21,6 @@ import numpy as np
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import Observation
-from facemoment.moment_detector.fusion.base import FusionResult
 from facemoment.moment_detector.visualize.layout import LayoutManager
 from facemoment.moment_detector.visualize.video_panel import VideoPanel
 from facemoment.moment_detector.visualize.stats_panel import StatsPanel
@@ -57,7 +56,7 @@ class RenderContext:
     frame: Frame
     observations: Dict[str, Observation] = field(default_factory=dict)
     classifier_obs: Optional[Observation] = None
-    fusion_result: Optional[FusionResult] = None
+    fusion_result: Optional[Observation] = None
     monitor_stats: Optional[Dict] = None
     is_gate_open: bool = False
     in_cooldown: bool = False
@@ -203,6 +202,7 @@ class DebugVisualizer:
             frame=ctx.frame,
             face_obs=ctx.observations.get("face") or ctx.observations.get("dummy"),
             pose_obs=ctx.observations.get("pose"),
+            gesture_obs=ctx.observations.get("gesture"),
             quality_obs=ctx.observations.get("quality"),
             classifier_obs=ctx.classifier_obs,
             fusion_result=ctx.fusion_result,
@@ -221,9 +221,10 @@ class DebugVisualizer:
         frame: Frame,
         face_obs: Optional[Observation] = None,
         pose_obs: Optional[Observation] = None,
+        gesture_obs: Optional[Observation] = None,
         quality_obs: Optional[Observation] = None,
         classifier_obs: Optional[Observation] = None,
-        fusion_result: Optional[FusionResult] = None,
+        fusion_result: Optional[Observation] = None,
         is_gate_open: bool = False,
         in_cooldown: bool = False,
         timing: Optional[Dict[str, float]] = None,
@@ -237,6 +238,7 @@ class DebugVisualizer:
             frame: Input frame.
             face_obs: Face observation.
             pose_obs: Pose observation.
+            gesture_obs: Gesture observation (hand landmarks).
             quality_obs: Quality observation.
             classifier_obs: Face classifier observation.
             fusion_result: Fusion result.
@@ -261,6 +263,7 @@ class DebugVisualizer:
             frame.data,
             face_obs=face_obs,
             pose_obs=pose_obs,
+            gesture_obs=gesture_obs,
             classifier_obs=classifier_obs,
             fusion_result=fusion_result,
             roi=roi,

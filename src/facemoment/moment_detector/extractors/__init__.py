@@ -18,7 +18,8 @@ Usage:
 
 # Base types - always available (no ML dependencies)
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
+    BaseExtractor,  # Alias for Module
     Observation,
     FaceObservation,
     IsolationLevel,

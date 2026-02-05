@@ -9,14 +9,14 @@ import numpy as np
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class QualityExtractor(BaseExtractor):
+class QualityExtractor(Module):
     """Extractor for image quality signals.
 
     Analyzes frames for quality metrics that affect composition:
@@ -35,7 +35,7 @@ class QualityExtractor(BaseExtractor):
 
     Example:
         >>> extractor = QualityExtractor()
-        >>> obs = extractor.extract(frame)
+        >>> obs = extractor.process(frame)
         >>> if obs.signals["quality_gate"] > 0.5:
         ...     print("Frame quality is acceptable")
     """
@@ -56,11 +56,12 @@ class QualityExtractor(BaseExtractor):
     def name(self) -> str:
         return "quality"
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
         """Extract quality signals from a frame.
 
         Args:
             frame: Input frame to analyze.
+            deps: Not used (no dependencies).
 
         Returns:
             Observation with quality signals.

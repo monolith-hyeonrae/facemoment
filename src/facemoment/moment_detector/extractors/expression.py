@@ -7,7 +7,7 @@ import time
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
     FaceObservation,
 )
@@ -17,7 +17,7 @@ from facemoment.moment_detector.extractors.outputs import FaceDetectOutput, Expr
 logger = logging.getLogger(__name__)
 
 
-class ExpressionExtractor(BaseExtractor):
+class ExpressionExtractor(Module):
     """Extractor for expression analysis.
 
     Depends on face_detect extractor for face bounding boxes.
@@ -33,8 +33,8 @@ class ExpressionExtractor(BaseExtractor):
         >>> # Use with FlowGraph for automatic dependency resolution
         >>> graph = (FlowGraphBuilder()
         ...     .source()
-        ...     .path("detect", extractors=[FaceDetectionExtractor()])
-        ...     .path("expr", extractors=[ExpressionExtractor()])
+        ...     .path("detect", modules=[FaceDetectionExtractor()])
+        ...     .path("expr", modules=[ExpressionExtractor()])
         ...     .build())
     """
 
@@ -93,7 +93,7 @@ class ExpressionExtractor(BaseExtractor):
             self._expression_backend.cleanup()
         logger.info("ExpressionExtractor cleaned up")
 
-    def extract(
+    def process(
         self,
         frame: Frame,
         deps: Optional[Dict[str, Observation]] = None,

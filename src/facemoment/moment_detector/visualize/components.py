@@ -13,22 +13,24 @@ import numpy as np
 # --- Debug layers ---
 
 class DebugLayer(IntEnum):
-    """Visualization layers that can be toggled at runtime with keys 1-8."""
+    """Visualization layers that can be toggled at runtime with keys 1-9."""
 
     FACE = 1        # Face bbox, ID labels, classified roles, emotion bars
     POSE = 2        # Upper body pose skeleton
-    ROI = 3         # ROI boundary rectangle
-    STATS = 4       # Stats panel (right side: timing, gate, summary)
-    TIMELINE = 5    # Timeline panel (bottom: emotion graph, triggers)
-    TRIGGER = 6     # Trigger flash on video + thumbnails in stats
-    FUSION = 7      # Fusion info (spike bar, baseline in stats)
-    FRAME_INFO = 8  # Frame number / timestamp overlay on video
+    GESTURE = 3     # Hand landmarks and gesture labels
+    ROI = 4         # ROI boundary rectangle
+    STATS = 5       # Stats panel (right side: timing, gate, summary)
+    TIMELINE = 6    # Timeline panel (bottom: emotion graph, triggers)
+    TRIGGER = 7     # Trigger flash on video + thumbnails in stats
+    FUSION = 8      # Fusion info (spike bar, baseline in stats)
+    FRAME_INFO = 9  # Frame number / timestamp overlay on video
 
 
 # Short labels for status display
 _LAYER_LABELS: Dict[int, str] = {
     DebugLayer.FACE: "FACE",
     DebugLayer.POSE: "POSE",
+    DebugLayer.GESTURE: "GEST",
     DebugLayer.ROI: "ROI",
     DebugLayer.STATS: "STAT",
     DebugLayer.TIMELINE: "TIME",

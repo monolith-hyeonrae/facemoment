@@ -10,7 +10,7 @@ import numpy as np
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import (
-    BaseExtractor,
+    Module,
     Observation,
 )
 from facemoment.moment_detector.extractors.types import KeypointIndex
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _hub = ObservabilityHub.get_instance()
 
 
-class PoseExtractor(BaseExtractor):
+class PoseExtractor(Module):
     """Extractor for pose estimation and gesture detection.
 
     Uses YOLOv8-Pose or similar backends to extract body keypoints
@@ -106,11 +106,12 @@ class PoseExtractor(BaseExtractor):
         self._wrist_history.clear()
         logger.info("PoseExtractor cleaned up")
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
         """Extract pose observations from a frame.
 
         Args:
             frame: Input frame to analyze.
+            deps: Not used (no dependencies).
 
         Returns:
             Observation with pose signals and gesture detection.

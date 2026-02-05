@@ -434,6 +434,7 @@ class PathwayDebugSession(DebugSession):
                 frame,
                 face_obs=face_obs,
                 pose_obs=obs_dict.get("pose"),
+                gesture_obs=obs_dict.get("gesture"),
                 quality_obs=obs_dict.get("quality"),
                 classifier_obs=classifier_obs,
                 fusion_result=fusion_result,
@@ -620,6 +621,7 @@ class PathwayDebugSession(DebugSession):
             frame,
             face_obs=observations.get("face") or observations.get("dummy"),
             pose_obs=observations.get("pose"),
+            gesture_obs=observations.get("gesture"),
             quality_obs=observations.get("quality"),
             classifier_obs=classifier_obs,
             fusion_result=fusion_result,
@@ -783,6 +785,7 @@ class SimpleDebugSession(DebugSession):
             frame,
             face_obs=observations.get("face") or observations.get("dummy"),
             pose_obs=observations.get("pose"),
+            gesture_obs=observations.get("gesture"),
             quality_obs=observations.get("quality"),
             classifier_obs=classifier_obs,
             fusion_result=fusion_result,
@@ -918,6 +921,7 @@ class DistributedDebugSession(DebugSession):
                     frame,
                     face_obs=obs_dict.get("face") or obs_dict.get("merged") or obs_dict.get("dummy"),
                     pose_obs=obs_dict.get("pose"),
+                    gesture_obs=obs_dict.get("gesture"),
                     quality_obs=obs_dict.get("quality"),
                     fusion_result=fusion_result,
                     is_gate_open=is_gate_open,
@@ -1157,7 +1161,8 @@ def _parse_roi(roi_str: Optional[str]) -> Optional[tuple]:
 def _try_load_extractor(name: str, extractors: list, args) -> bool:
     """Try to load and add an extractor."""
     device = getattr(args, 'device', 'cuda:0')
-    roi = _parse_roi(getattr(args, 'roi', None))
+    # Use same default ROI as debug session for consistency
+    roi = _parse_roi(getattr(args, 'roi', None)) or (0.3, 0.1, 0.7, 0.6)
 
     try:
         if name == 'face':
