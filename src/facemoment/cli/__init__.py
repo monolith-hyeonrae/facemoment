@@ -50,6 +50,10 @@ Examples:
         "--graph", nargs="?", const="ascii", choices=["ascii", "dot"],
         help="Show pipeline FlowGraph (ascii or dot format, default: ascii)",
     )
+    info_parser.add_argument(
+        "--steps", action="store_true",
+        help="Show internal processing steps of each extractor",
+    )
 
     # debug command (unified)
     debug_parser = subparsers.add_parser(

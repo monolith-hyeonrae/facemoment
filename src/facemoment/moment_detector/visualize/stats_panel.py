@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from facemoment.moment_detector.extractors.base import Observation, FaceObservation
+from facemoment.moment_detector.scoring.frame_scorer import ScoreResult
 from facemoment.moment_detector.visualize.components import (
     COLOR_DARK_BGR,
     COLOR_WHITE_BGR,
@@ -67,6 +68,7 @@ class StatsPanel:
         backend_label: str = "",
         source_image: Optional[np.ndarray] = None,
         layers: Optional[LayerState] = None,
+        score_result: Optional[ScoreResult] = None,
     ) -> None:
         """Draw stats panel content onto canvas.
 
@@ -83,6 +85,7 @@ class StatsPanel:
             backend_label: Label like "PATHWAY", "SIMPLE", "DISTRIBUTED".
             source_image: Source image for trigger thumbnail capture.
             layers: Layer visibility state. None means all layers enabled.
+            score_result: Frame scoring result (optional).
         """
         self._frame_count += 1
         rx1, ry1, rx2, ry2 = region
@@ -119,6 +122,10 @@ class StatsPanel:
                 y = self._draw_classifier_summary(canvas, x, y, classifier_obs)
             elif face_obs is not None:
                 y = self._draw_face_summary(canvas, x, y, face_obs)
+
+        # Frame score (if available)
+        if score_result is not None:
+            y = self._draw_frame_score(canvas, x, y, rx2 - rx1 - 16, score_result)
 
         # Fusion info (skip if FUSION layer is off)
         if fusion_result is not None:
@@ -285,6 +292,93 @@ class StatsPanel:
                 cv2.putText(canvas, info, (x, y), FONT, 0.32, color, 1)
                 y += 11
 
+        return y
+
+    def _draw_frame_score(
+        self,
+        canvas: np.ndarray,
+        x: int,
+        y: int,
+        width: int,
+        result: ScoreResult,
+    ) -> int:
+        """Draw frame scoring result with component bars.
+
+        Args:
+            canvas: Canvas to draw on.
+            x: Left x coordinate.
+            y: Top y coordinate.
+            width: Available width.
+            result: Frame scoring result.
+
+        Returns:
+            Next y position.
+        """
+        y += 5  # Spacing
+
+        # Title
+        if result.is_filtered:
+            # Filtered frame - show in red
+            cv2.putText(
+                canvas, f"FILTERED: {result.filter_reason}",
+                (x, y), FONT, FONT_SMALL, COLOR_RED_BGR, 1
+            )
+            y += 16
+            return y
+
+        # Total score with color coding
+        total = result.total_score
+        if total >= 0.7:
+            score_color = COLOR_GREEN_BGR
+        elif total >= 0.5:
+            score_color = COLOR_HAPPY_BGR  # Yellow
+        else:
+            score_color = COLOR_RED_BGR
+
+        cv2.putText(
+            canvas, f"Score: {total:.2f}",
+            (x, y), FONT, FONT_MEDIUM, score_color, 1
+        )
+        y += 16
+
+        # Component bars
+        bar_height = 8
+        bar_width = width - 50
+        components = [
+            ("Tech", result.technical_score, (100, 200, 100)),  # Green-ish
+            ("Action", result.action_score, (100, 200, 255)),  # Orange-ish
+            ("ID", result.identity_score, (255, 200, 100)),  # Blue-ish
+        ]
+
+        for label, score, color in components:
+            # Label
+            cv2.putText(canvas, f"{label}:", (x, y + bar_height - 2), FONT, 0.28, COLOR_GRAY_BGR, 1)
+
+            # Background bar
+            bar_x = x + 40
+            cv2.rectangle(
+                canvas, (bar_x, y), (bar_x + bar_width, y + bar_height),
+                (40, 40, 40), -1
+            )
+
+            # Filled bar
+            fill_width = int(bar_width * min(1.0, score))
+            if fill_width > 0:
+                cv2.rectangle(
+                    canvas, (bar_x, y), (bar_x + fill_width, y + bar_height),
+                    color, -1
+                )
+
+            # Score value
+            cv2.putText(
+                canvas, f"{score:.2f}",
+                (bar_x + bar_width + 3, y + bar_height - 1),
+                FONT, 0.28, COLOR_GRAY_BGR, 1
+            )
+
+            y += bar_height + 4
+
+        y += 4
         return y
 
     def _draw_fusion_info(

@@ -21,6 +21,7 @@ import numpy as np
 from visualbase import Frame
 
 from facemoment.moment_detector.extractors.base import Observation
+from facemoment.moment_detector.scoring.frame_scorer import ScoreResult
 from facemoment.moment_detector.visualize.layout import LayoutManager
 from facemoment.moment_detector.visualize.video_panel import VideoPanel
 from facemoment.moment_detector.visualize.stats_panel import StatsPanel
@@ -231,6 +232,7 @@ class DebugVisualizer:
         roi: Optional[Tuple[float, float, float, float]] = None,
         monitor_stats: Optional[Dict] = None,
         backend_label: str = "",
+        score_result: Optional[ScoreResult] = None,
     ) -> np.ndarray:
         """Create combined debug visualization with panel layout.
 
@@ -248,6 +250,7 @@ class DebugVisualizer:
             roi: ROI boundary (x1, y1, x2, y2) in normalized coords.
             monitor_stats: PathwayMonitor frame stats.
             backend_label: Backend indicator label.
+            score_result: Frame scoring result (optional).
         """
         h, w = frame.data.shape[:2]
 
@@ -296,6 +299,7 @@ class DebugVisualizer:
                 backend_label=backend_label,
                 source_image=frame.data,
                 layers=self.layers,
+                score_result=score_result,
             )
 
         # 4. Timeline panel: always update history, draw only if enabled

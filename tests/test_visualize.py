@@ -293,3 +293,60 @@ class TestFaceClassifierVisualization:
 
         assert result is not None
         assert result.shape == sample_image.shape
+
+
+class TestScoreVisualization:
+    """Tests for frame score visualization in debug view."""
+
+    @pytest.fixture
+    def visualizer(self):
+        return DebugVisualizer()
+
+    @pytest.fixture
+    def sample_frame(self):
+        """Create a sample Frame."""
+        frame = MagicMock()
+        frame.data = np.zeros((480, 640, 3), dtype=np.uint8)
+        frame.frame_id = 1
+        frame.t_src_ns = 0
+        return frame
+
+    def test_create_debug_view_with_score_result(self, visualizer, sample_frame):
+        """Test creating debug view with score result."""
+        from facemoment.moment_detector.scoring import ScoreResult
+
+        score_result = ScoreResult(
+            total_score=0.75,
+            technical_score=0.80,
+            action_score=0.70,
+            identity_score=0.85,
+            is_filtered=False,
+            filter_reason=None,
+        )
+
+        result = visualizer.create_debug_view(sample_frame, score_result=score_result)
+
+        assert result is not None
+        vh, vw = sample_frame.data.shape[:2]
+        assert result.shape[0] > vh
+        assert result.shape[1] > vw
+
+    def test_create_debug_view_with_filtered_score(self, visualizer, sample_frame):
+        """Test creating debug view with filtered score result."""
+        from facemoment.moment_detector.scoring import ScoreResult
+
+        score_result = ScoreResult(
+            total_score=0.0,
+            technical_score=0.0,
+            action_score=0.0,
+            identity_score=0.0,
+            is_filtered=True,
+            filter_reason="no_face",
+        )
+
+        result = visualizer.create_debug_view(sample_frame, score_result=score_result)
+
+        assert result is not None
+        vh, vw = sample_frame.data.shape[:2]
+        assert result.shape[0] > vh
+        assert result.shape[1] > vw

@@ -9,6 +9,12 @@ With options:
     >>> result = fm.run("video.mp4", fps=10, cooldown=3.0)
     >>> result = fm.run("video.mp4", output_dir="./clips")
 
+Frame Scoring:
+    >>> from facemoment.moment_detector.scoring import FrameScorer
+    >>> scorer = FrameScorer()
+    >>> result = scorer.score(face_obs=face_obs, quality_obs=quality_obs)
+    >>> print(f"Score: {result.total_score:.2f}")
+
 Advanced:
     >>> from facemoment import MomentDetector
     >>> from facemoment.moment_detector.extractors import FaceExtractor

@@ -106,6 +106,7 @@ class DebugSession:
         self.writer = None
         self.writer_initialized = False
         self.frame_count = 0
+        self.scorer = None  # FrameScorer for frame quality scoring
 
         # Report data (Phase 19c)
         self.report_data: Optional[Dict[str, Any]] = None
@@ -119,9 +120,10 @@ class DebugSession:
             self._teardown()
 
     def _setup(self):
-        """Common setup: observability, video, visualizer."""
+        """Common setup: observability, video, visualizer, scorer."""
         import cv2
         from facemoment.moment_detector.visualize import DebugVisualizer
+        from facemoment.moment_detector.scoring import FrameScorer
 
         # Observability
         trace_level = getattr(self.args, 'trace', 'off')
@@ -159,6 +161,9 @@ class DebugSession:
 
         # Visualizer
         self.visualizer = DebugVisualizer()
+
+        # Frame scorer
+        self.scorer = FrameScorer()
 
     def _print_header(self):
         """Print session header."""
@@ -430,6 +435,15 @@ class PathwayDebugSession(DebugSession):
             is_gate_open = fusion.is_gate_open if fusion else False
             in_cooldown = fusion.in_cooldown if fusion else False
 
+            # Frame scoring
+            score_result = None
+            if session.scorer:
+                score_result = session.scorer.score(
+                    face_obs=face_obs,
+                    pose_obs=obs_dict.get("pose"),
+                    quality_obs=obs_dict.get("quality"),
+                )
+
             debug_image = session.visualizer.create_debug_view(
                 frame,
                 face_obs=face_obs,
@@ -442,6 +456,7 @@ class PathwayDebugSession(DebugSession):
                 in_cooldown=in_cooldown,
                 roi=session.roi,
                 backend_label=session.backend_label,
+                score_result=score_result,
             )
 
             # Writer
@@ -617,6 +632,15 @@ class PathwayDebugSession(DebugSession):
             if face_obs and face_obs.timing:
                 timing_info = face_obs.timing
 
+        # Frame scoring
+        score_result = None
+        if self.scorer:
+            score_result = self.scorer.score(
+                face_obs=observations.get("face") or observations.get("dummy"),
+                pose_obs=observations.get("pose"),
+                quality_obs=observations.get("quality"),
+            )
+
         debug_image = self.visualizer.create_debug_view(
             frame,
             face_obs=observations.get("face") or observations.get("dummy"),
@@ -631,6 +655,7 @@ class PathwayDebugSession(DebugSession):
             roi=self.roi,
             monitor_stats=self.monitor.get_frame_stats(),
             backend_label=self.backend_label,
+            score_result=score_result,
         )
 
         return debug_image, timing_info
@@ -781,6 +806,15 @@ class SimpleDebugSession(DebugSession):
             if face_obs and face_obs.timing:
                 timing_info = face_obs.timing
 
+        # Frame scoring
+        score_result = None
+        if self.scorer:
+            score_result = self.scorer.score(
+                face_obs=observations.get("face") or observations.get("dummy"),
+                pose_obs=observations.get("pose"),
+                quality_obs=observations.get("quality"),
+            )
+
         debug_image = self.visualizer.create_debug_view(
             frame,
             face_obs=observations.get("face") or observations.get("dummy"),
@@ -794,6 +828,7 @@ class SimpleDebugSession(DebugSession):
             timing=timing_info if self.profile_mode else None,
             roi=self.roi,
             backend_label="SIMPLE",
+            score_result=score_result,
         )
 
         return debug_image, timing_info
@@ -917,6 +952,15 @@ class DistributedDebugSession(DebugSession):
                 if fusion_result:
                     in_cooldown = not fusion_result.should_trigger and fusion_result.trigger is None
 
+                # Frame scoring
+                score_result = None
+                if self.scorer:
+                    score_result = self.scorer.score(
+                        face_obs=obs_dict.get("face") or obs_dict.get("merged") or obs_dict.get("dummy"),
+                        pose_obs=obs_dict.get("pose"),
+                        quality_obs=obs_dict.get("quality"),
+                    )
+
                 debug_image = self.visualizer.create_debug_view(
                     frame,
                     face_obs=obs_dict.get("face") or obs_dict.get("merged") or obs_dict.get("dummy"),
@@ -927,6 +971,7 @@ class DistributedDebugSession(DebugSession):
                     is_gate_open=is_gate_open,
                     in_cooldown=in_cooldown,
                     backend_label="DISTRIBUTED",
+                    score_result=score_result,
                 )
 
                 if self.args.output and not self.writer_initialized:
