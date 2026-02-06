@@ -10,6 +10,9 @@ from facemoment.moment_detector.extractors.base import (
     Module,
     Observation,
     FaceObservation,
+    ProcessingStep,
+    processing_step,
+    get_processing_steps,
 )
 from facemoment.moment_detector.extractors.backends.base import ExpressionBackend
 from facemoment.moment_detector.extractors.outputs import FaceDetectOutput, ExpressionOutput
@@ -49,10 +52,17 @@ class ExpressionExtractor(Module):
         self._device = device
         self._expression_backend = expression_backend
         self._initialized = False
+        # Step timing tracking (auto-populated by @processing_step decorator)
+        self._step_timings: Optional[Dict[str, float]] = None
 
     @property
     def name(self) -> str:
         return "expression"
+
+    @property
+    def processing_steps(self) -> List[ProcessingStep]:
+        """Get the list of internal processing steps (auto-extracted from decorators)."""
+        return get_processing_steps(self)
 
     def initialize(self) -> None:
         if self._initialized:
@@ -93,50 +103,34 @@ class ExpressionExtractor(Module):
             self._expression_backend.cleanup()
         logger.info("ExpressionExtractor cleaned up")
 
-    def process(
+    # ========== Processing Steps (decorated methods) ==========
+
+    @processing_step(
+        name="expression",
+        description="Facial expression and emotion analysis",
+        backend="HSEmotion",
+        input_type="Frame + List[DetectedFace]",
+        output_type="List[ExpressionResult]",
+    )
+    def _analyze_expressions(self, image, detected_faces) -> List:
+        """Analyze expressions for detected faces."""
+        if self._expression_backend is None:
+            return []
+        return self._expression_backend.analyze(image, detected_faces)
+
+    @processing_step(
+        name="aggregation",
+        description="Aggregate expression signals (max, happy, angry, neutral)",
+        input_type="List[ExpressionResult] + List[FaceObservation]",
+        output_type="ExpressionOutput",
+        depends_on=["expression"],
+    )
+    def _aggregate_expressions(
         self,
-        frame: Frame,
-        deps: Optional[Dict[str, Observation]] = None,
-    ) -> Optional[Observation]:
-        # Get face_detect dependency (type-safe access)
-        face_obs = deps.get("face_detect") if deps else None
-        if face_obs is None:
-            logger.warning("ExpressionExtractor: no face_detect dependency")
-            return None
-
-        face_data: FaceDetectOutput = face_obs.data
-        if not face_data:
-            return None
-
-        # Type-safe attribute access
-        detected_faces = face_data.detected_faces
-        face_observations = face_data.faces
-
-        if not detected_faces or not face_observations:
-            return Observation(
-                source=self.name,
-                frame_id=frame.frame_id,
-                t_ns=frame.t_src_ns,
-                signals={
-                    "max_expression": 0.0,
-                    "expression_happy": 0.0,
-                    "expression_angry": 0.0,
-                    "expression_neutral": 1.0,
-                },
-                data=ExpressionOutput(faces=[]),
-            )
-
-        start_ns = time.perf_counter_ns()
-        timing = {}
-
-        # Analyze expressions
-        expressions = []
-        if self._expression_backend is not None:
-            expr_start = time.perf_counter_ns()
-            expressions = self._expression_backend.analyze(frame.data, detected_faces)
-            timing["expression_ms"] = (time.perf_counter_ns() - expr_start) / 1_000_000
-
-        # Update face observations with expression data
+        expressions: List,
+        face_observations: List[FaceObservation],
+    ) -> Dict:
+        """Aggregate expression data into output format."""
         updated_faces = []
         max_expression = 0.0
         max_happy = 0.0
@@ -186,18 +180,67 @@ class ExpressionExtractor(Module):
             )
             updated_faces.append(updated_face)
 
-        timing["total_ms"] = (time.perf_counter_ns() - start_ns) / 1_000_000
-
-        return Observation(
-            source=self.name,
-            frame_id=frame.frame_id,
-            t_ns=frame.t_src_ns,
-            signals={
+        return {
+            "faces": updated_faces,
+            "signals": {
                 "max_expression": max_expression,
                 "expression_happy": max_happy,
                 "expression_angry": max_angry,
                 "expression_neutral": min_neutral,
             },
-            data=ExpressionOutput(faces=updated_faces),
+        }
+
+    # ========== Main process method ==========
+
+    def process(
+        self,
+        frame: Frame,
+        deps: Optional[Dict[str, Observation]] = None,
+    ) -> Optional[Observation]:
+        # Get face_detect dependency (type-safe access)
+        face_obs = deps.get("face_detect") if deps else None
+        if face_obs is None:
+            logger.warning("ExpressionExtractor: no face_detect dependency")
+            return None
+
+        face_data: FaceDetectOutput = face_obs.data
+        if not face_data:
+            return None
+
+        # Type-safe attribute access
+        detected_faces = face_data.detected_faces
+        face_observations = face_data.faces
+
+        if not detected_faces or not face_observations:
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "max_expression": 0.0,
+                    "expression_happy": 0.0,
+                    "expression_angry": 0.0,
+                    "expression_neutral": 1.0,
+                },
+                data=ExpressionOutput(faces=[]),
+            )
+
+        # Enable step timing collection
+        self._step_timings = {}
+
+        # Execute processing steps (timing auto-tracked by decorators)
+        expressions = self._analyze_expressions(frame.data, detected_faces)
+        result = self._aggregate_expressions(expressions, face_observations)
+
+        # Collect timing data
+        timing = self._step_timings.copy() if self._step_timings else None
+        self._step_timings = None
+
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals=result["signals"],
+            data=ExpressionOutput(faces=result["faces"]),
             timing=timing,
         )

@@ -10,6 +10,9 @@ from facemoment.moment_detector.extractors.base import (
     Module,
     Observation,
     FaceObservation,
+    ProcessingStep,
+    processing_step,
+    get_processing_steps,
 )
 from facemoment.moment_detector.extractors.backends.base import (
     FaceDetectionBackend,
@@ -48,7 +51,6 @@ class FaceDetectionExtractor(Module):
         self._device = device
         self._track_faces = track_faces
         self._iou_threshold = iou_threshold
-        # ROI default: matches debug session default for consistency
         self._roi = roi if roi is not None else (0.3, 0.1, 0.7, 0.6)
         self._initialized = False
         self._face_backend = face_backend
@@ -57,9 +59,17 @@ class FaceDetectionExtractor(Module):
         self._next_face_id = 0
         self._prev_faces: List[tuple[int, tuple[int, int, int, int]]] = []
 
+        # Step timing tracking (auto-populated by @processing_step decorator)
+        self._step_timings: Optional[Dict[str, float]] = None
+
     @property
     def name(self) -> str:
         return "face_detect"
+
+    @property
+    def processing_steps(self) -> List[ProcessingStep]:
+        """Get the list of internal processing steps (auto-extracted from decorators)."""
+        return get_processing_steps(self)
 
     def initialize(self) -> None:
         if self._initialized:
@@ -82,40 +92,76 @@ class FaceDetectionExtractor(Module):
         self._prev_faces = []
         logger.info("FaceDetectionExtractor cleaned up")
 
-    def process(
+    # ========== Processing Steps (decorated methods) ==========
+
+    @processing_step(
+        name="detect",
+        description="Face detection with landmarks and head pose",
+        backend="InsightFace SCRFD",
+        input_type="Frame (BGR image)",
+        output_type="List[DetectedFace]",
+    )
+    def _detect_faces(self, image) -> List[DetectedFace]:
+        """Detect faces using backend."""
+        return self._face_backend.detect(image)
+
+    @processing_step(
+        name="tracking",
+        description="Face ID assignment using IOU matching",
+        backend="IOU-based",
+        input_type="List[DetectedFace]",
+        output_type="List[int] (face IDs)",
+        depends_on=["detect"],
+    )
+    def _assign_face_ids(self, faces: List[DetectedFace]) -> List[int]:
+        """Assign face IDs using simple IoU-based tracking."""
+        if not self._track_faces or not self._prev_faces:
+            ids = list(range(self._next_face_id, self._next_face_id + len(faces)))
+            self._next_face_id += len(faces)
+            return ids
+
+        assigned_ids = []
+        used_prev_ids = set()
+
+        for face in faces:
+            best_id = None
+            best_iou = self._iou_threshold
+
+            for prev_id, prev_bbox in self._prev_faces:
+                if prev_id in used_prev_ids:
+                    continue
+                iou = self._compute_iou(face.bbox, prev_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_id = prev_id
+
+            if best_id is not None:
+                assigned_ids.append(best_id)
+                used_prev_ids.add(best_id)
+            else:
+                assigned_ids.append(self._next_face_id)
+                self._next_face_id += 1
+
+        return assigned_ids
+
+    @processing_step(
+        name="roi_filter",
+        description="Filter faces outside region of interest",
+        input_type="List[DetectedFace] + IDs",
+        output_type="List[FaceObservation] (filtered)",
+        depends_on=["tracking"],
+    )
+    def _filter_and_convert(
         self,
-        frame: Frame,
-        deps: Optional[Dict[str, Observation]] = None,
-    ) -> Optional[Observation]:
-        if self._face_backend is None:
-            raise RuntimeError("Extractor not initialized")
-
-        start_ns = time.perf_counter_ns()
-        image = frame.data
-        h, w = image.shape[:2]
-        timing = {}
-
-        # Detect faces
-        detect_start = time.perf_counter_ns()
-        detected_faces = self._face_backend.detect(image)
-        timing["detect_ms"] = (time.perf_counter_ns() - detect_start) / 1_000_000
-
-        if not detected_faces:
-            return Observation(
-                source=self.name,
-                frame_id=frame.frame_id,
-                t_ns=frame.t_src_ns,
-                signals={"face_count": 0},
-                data=FaceDetectOutput(faces=[], detected_faces=[], image_size=(w, h)),
-                timing=timing,
-            )
-
-        # Assign face IDs
-        face_ids = self._assign_face_ids(detected_faces)
-
-        # Convert to FaceObservations
+        detected_faces: List[DetectedFace],
+        face_ids: List[int],
+        image_size: tuple[int, int],
+    ) -> tuple[List[FaceObservation], List[tuple[int, tuple]]]:
+        """Filter by ROI and convert to FaceObservation."""
+        w, h = image_size
         face_observations = []
-        prev_faces_update = []  # Track (face_id, original_bbox) for IOU tracking
+        prev_faces_update = []
+
         for i, (face, face_id) in enumerate(zip(detected_faces, face_ids)):
             x, y, bw, bh = face.bbox
             norm_x = x / w
@@ -153,17 +199,56 @@ class FaceDetectionExtractor(Module):
                 roll=face.roll,
                 area_ratio=area_ratio,
                 center_distance=center_distance,
-                expression=0.0,  # No expression analysis here
+                expression=0.0,
                 signals={},
             )
             face_observations.append(face_obs)
-            # Store original bbox for IOU tracking (not filtered index)
             prev_faces_update.append((face_id, face.bbox))
 
-        # Update tracking state with correct face_id -> bbox mapping
+        return face_observations, prev_faces_update
+
+    # ========== Main process method ==========
+
+    def process(
+        self,
+        frame: Frame,
+        deps: Optional[Dict[str, Observation]] = None,
+    ) -> Optional[Observation]:
+        if self._face_backend is None:
+            raise RuntimeError("Extractor not initialized")
+
+        # Enable step timing collection
+        self._step_timings = {}
+
+        image = frame.data
+        h, w = image.shape[:2]
+
+        # Execute processing steps (timing auto-tracked by decorators)
+        detected_faces = self._detect_faces(image)
+
+        if not detected_faces:
+            timing = self._step_timings.copy() if self._step_timings else None
+            self._step_timings = None
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"face_count": 0},
+                data=FaceDetectOutput(faces=[], detected_faces=[], image_size=(w, h)),
+                timing=timing,
+            )
+
+        face_ids = self._assign_face_ids(detected_faces)
+        face_observations, prev_faces_update = self._filter_and_convert(
+            detected_faces, face_ids, (w, h)
+        )
+
+        # Update tracking state
         self._prev_faces = prev_faces_update
 
-        timing["total_ms"] = (time.perf_counter_ns() - start_ns) / 1_000_000
+        # Collect timing data
+        timing = self._step_timings.copy() if self._step_timings else None
+        self._step_timings = None
 
         return Observation(
             source=self.name,
@@ -177,36 +262,6 @@ class FaceDetectionExtractor(Module):
             ),
             timing=timing,
         )
-
-    def _assign_face_ids(self, faces: List[DetectedFace]) -> List[int]:
-        if not self._track_faces or not self._prev_faces:
-            ids = list(range(self._next_face_id, self._next_face_id + len(faces)))
-            self._next_face_id += len(faces)
-            return ids
-
-        assigned_ids = []
-        used_prev_ids = set()
-
-        for face in faces:
-            best_id = None
-            best_iou = self._iou_threshold
-
-            for prev_id, prev_bbox in self._prev_faces:
-                if prev_id in used_prev_ids:
-                    continue
-                iou = self._compute_iou(face.bbox, prev_bbox)
-                if iou > best_iou:
-                    best_iou = iou
-                    best_id = prev_id
-
-            if best_id is not None:
-                assigned_ids.append(best_id)
-                used_prev_ids.add(best_id)
-            else:
-                assigned_ids.append(self._next_face_id)
-                self._next_face_id += 1
-
-        return assigned_ids
 
     @staticmethod
     def _compute_iou(

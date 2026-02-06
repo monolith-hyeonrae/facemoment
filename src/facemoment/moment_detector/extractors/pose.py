@@ -12,6 +12,9 @@ from visualbase import Frame
 from facemoment.moment_detector.extractors.base import (
     Module,
     Observation,
+    ProcessingStep,
+    processing_step,
+    get_processing_steps,
 )
 from facemoment.moment_detector.extractors.types import KeypointIndex
 from facemoment.moment_detector.extractors.outputs import PoseOutput
@@ -78,9 +81,17 @@ class PoseExtractor(Module):
         self._wrist_history: Dict[int, deque] = {}
         self._last_fps_estimate = 30.0
 
+        # Step timing tracking (auto-populated by @processing_step decorator)
+        self._step_timings: Optional[Dict[str, float]] = None
+
     @property
     def name(self) -> str:
         return "pose"
+
+    @property
+    def processing_steps(self) -> List[ProcessingStep]:
+        """Get the list of internal processing steps (auto-extracted from decorators)."""
+        return get_processing_steps(self)
 
     def initialize(self) -> None:
         """Initialize pose estimation backend."""
@@ -106,6 +117,129 @@ class PoseExtractor(Module):
         self._wrist_history.clear()
         logger.info("PoseExtractor cleaned up")
 
+    # ========== Processing Steps (decorated methods) ==========
+
+    @processing_step(
+        name="pose_estimation",
+        description="Detect body keypoints (17 COCO format)",
+        backend="YOLOPoseBackend",
+        input_type="Frame (BGR image)",
+        output_type="List[PoseKeypoints]",
+    )
+    def _detect_poses(self, image) -> List:
+        """Detect poses using backend."""
+        return self._pose_backend.detect(image)
+
+    @processing_step(
+        name="hands_raised_check",
+        description="Check if hands are above shoulders",
+        input_type="List[PoseKeypoints]",
+        output_type="Dict (count, signals)",
+        depends_on=["pose_estimation"],
+    )
+    def _check_hands_raised(self, poses: List) -> Dict:
+        """Check hand positions relative to shoulders for all poses."""
+        hands_raised_count = 0
+        pose_signals: Dict[str, float] = {}
+
+        for pose in poses:
+            person_id = pose.person_id or 0
+            kpts = pose.keypoints
+
+            left_raised = self._is_hand_raised(
+                kpts, KeypointIndex.LEFT_WRIST, KeypointIndex.LEFT_SHOULDER
+            )
+            right_raised = self._is_hand_raised(
+                kpts, KeypointIndex.RIGHT_WRIST, KeypointIndex.RIGHT_SHOULDER
+            )
+
+            if left_raised or right_raised:
+                hands_raised_count += 1
+
+            pose_signals[f"person_{person_id}_left_raised"] = 1.0 if left_raised else 0.0
+            pose_signals[f"person_{person_id}_right_raised"] = 1.0 if right_raised else 0.0
+
+        return {"count": hands_raised_count, "signals": pose_signals}
+
+    @processing_step(
+        name="wave_detection",
+        description="Detect hand waving using FFT frequency analysis",
+        backend="FFT oscillation detector",
+        input_type="Wrist position history",
+        output_type="Dict (detected, confidence)",
+        optional=True,
+        depends_on=["pose_estimation"],
+    )
+    def _detect_waves(self, poses: List, t_ns: int, image_width: int) -> Dict:
+        """Detect wave patterns for all poses."""
+        wave_detected = False
+        wave_confidence = 0.0
+
+        for pose in poses:
+            person_id = pose.person_id or 0
+            kpts = pose.keypoints
+
+            left_wrist_x = self._get_normalized_x(kpts, KeypointIndex.LEFT_WRIST, image_width)
+            right_wrist_x = self._get_normalized_x(kpts, KeypointIndex.RIGHT_WRIST, image_width)
+
+            if left_wrist_x is not None or right_wrist_x is not None:
+                if person_id not in self._wrist_history:
+                    self._wrist_history[person_id] = deque(maxlen=self._wave_window)
+
+                self._wrist_history[person_id].append((t_ns, left_wrist_x, right_wrist_x))
+
+                wave_score = self._detect_wave_pattern(person_id, t_ns)
+                if wave_score > wave_confidence:
+                    wave_confidence = wave_score
+                    if wave_score > 0.5:
+                        wave_detected = True
+
+        return {"detected": wave_detected, "confidence": wave_confidence}
+
+    @processing_step(
+        name="aggregation",
+        description="Aggregate person count and gesture signals",
+        input_type="Detection results",
+        output_type="Observation",
+        depends_on=["hands_raised_check", "wave_detection"],
+    )
+    def _aggregate_results(
+        self,
+        poses: List,
+        hands_result: Dict,
+        wave_result: Dict,
+        image_size: tuple,
+    ) -> Dict:
+        """Aggregate all detection results."""
+        w, h = image_size
+
+        keypoints_data = []
+        for pose in poses:
+            keypoints_data.append({
+                "person_id": pose.person_id or 0,
+                "keypoints": pose.keypoints.tolist(),
+                "image_size": (w, h),
+            })
+
+        signals = {
+            "person_count": float(len(poses)),
+            "hands_raised_count": float(hands_result["count"]),
+            "hand_wave_detected": 1.0 if wave_result["detected"] else 0.0,
+            "hand_wave_confidence": wave_result["confidence"],
+            **hands_result["signals"],
+        }
+
+        return {
+            "signals": signals,
+            "keypoints_data": keypoints_data,
+            "metadata": {
+                "wave_detected": wave_result["detected"],
+                "poses_detected": len(poses),
+            },
+        }
+
+    # ========== Main process method ==========
+
     def process(self, frame: Frame, deps=None) -> Optional[Observation]:
         """Extract pose observations from a frame.
 
@@ -126,10 +260,17 @@ class PoseExtractor(Module):
         h, w = image.shape[:2]
         t_ns = frame.t_src_ns
 
-        # Detect poses
-        poses = self._pose_backend.detect(image)
+        # Enable step timing collection
+        self._step_timings = {}
+
+        # Execute processing steps (timing auto-tracked by decorators)
+        poses = self._detect_poses(image)
 
         if not poses:
+            # Collect timing data
+            timing = self._step_timings.copy() if self._step_timings else None
+            self._step_timings = None
+
             # Emit timing record
             if _hub.enabled:
                 processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
@@ -144,83 +285,36 @@ class PoseExtractor(Module):
                     "hand_wave_detected": 0.0,
                 },
                 data=PoseOutput(keypoints=[], person_count=0),
+                timing=timing,
             )
 
-        # Analyze each pose
-        hands_raised_count = 0
-        wave_detected = False
-        wave_confidence = 0.0
-        pose_signals: Dict[str, float] = {}
-
-        for pose in poses:
-            person_id = pose.person_id or 0
-            kpts = pose.keypoints
-
-            # Check hand positions relative to shoulders
-            left_raised = self._is_hand_raised(kpts, KeypointIndex.LEFT_WRIST, KeypointIndex.LEFT_SHOULDER)
-            right_raised = self._is_hand_raised(kpts, KeypointIndex.RIGHT_WRIST, KeypointIndex.RIGHT_SHOULDER)
-
-            if left_raised or right_raised:
-                hands_raised_count += 1
-
-            # Update wrist history for wave detection
-            left_wrist_x = self._get_normalized_x(kpts, KeypointIndex.LEFT_WRIST, w)
-            right_wrist_x = self._get_normalized_x(kpts, KeypointIndex.RIGHT_WRIST, w)
-
-            if left_wrist_x is not None or right_wrist_x is not None:
-                if person_id not in self._wrist_history:
-                    self._wrist_history[person_id] = deque(maxlen=self._wave_window)
-
-                self._wrist_history[person_id].append(
-                    (t_ns, left_wrist_x, right_wrist_x)
-                )
-
-                # Check for wave pattern
-                wave_score = self._detect_wave_pattern(person_id, t_ns)
-                if wave_score > wave_confidence:
-                    wave_confidence = wave_score
-                    if wave_score > 0.5:
-                        wave_detected = True
-
-            # Store per-person signals
-            pose_signals[f"person_{person_id}_left_raised"] = 1.0 if left_raised else 0.0
-            pose_signals[f"person_{person_id}_right_raised"] = 1.0 if right_raised else 0.0
+        # Execute analysis steps
+        hands_result = self._check_hands_raised(poses)
+        wave_result = self._detect_waves(poses, t_ns, w)
+        result = self._aggregate_results(poses, hands_result, wave_result, (w, h))
 
         # Clean up old history entries
         self._cleanup_old_history(t_ns)
 
-        signals = {
-            "person_count": float(len(poses)),
-            "hands_raised_count": float(hands_raised_count),
-            "hand_wave_detected": 1.0 if wave_detected else 0.0,
-            "hand_wave_confidence": wave_confidence,
-            **pose_signals,
-        }
+        # Collect timing data
+        timing = self._step_timings.copy() if self._step_timings else None
+        self._step_timings = None
 
         # Emit observability records
         if _hub.enabled:
             processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
-            self._emit_extract_record(frame, len(poses), wave_detected, processing_ms, signals)
-
-        # Build keypoints data for visualization
-        keypoints_data = []
-        for pose in poses:
-            keypoints_data.append({
-                "person_id": pose.person_id or 0,
-                "keypoints": pose.keypoints.tolist(),  # (17, 3) array
-                "image_size": (w, h),
-            })
+            self._emit_extract_record(
+                frame, len(poses), wave_result["detected"], processing_ms, result["signals"]
+            )
 
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
             t_ns=t_ns,
-            signals=signals,
-            data=PoseOutput(keypoints=keypoints_data, person_count=len(poses)),
-            metadata={
-                "wave_detected": wave_detected,
-                "poses_detected": len(poses),
-            },
+            signals=result["signals"],
+            data=PoseOutput(keypoints=result["keypoints_data"], person_count=len(poses)),
+            metadata=result["metadata"],
+            timing=timing,
         )
 
     def _is_hand_raised(

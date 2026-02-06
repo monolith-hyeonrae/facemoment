@@ -11,6 +11,9 @@ from visualbase import Frame
 from facemoment.moment_detector.extractors.base import (
     Module,
     Observation,
+    ProcessingStep,
+    processing_step,
+    get_processing_steps,
 )
 from facemoment.moment_detector.extractors.types import GestureType, HandLandmarkIndex
 from facemoment.moment_detector.extractors.outputs import GestureOutput
@@ -68,9 +71,17 @@ class GestureExtractor(Module):
         self._min_gesture_confidence = min_gesture_confidence
         self._initialized = False
 
+        # Step timing tracking (auto-populated by @processing_step decorator)
+        self._step_timings: Optional[Dict[str, float]] = None
+
     @property
     def name(self) -> str:
         return "gesture"
+
+    @property
+    def processing_steps(self) -> List[ProcessingStep]:
+        """Get the list of internal processing steps (auto-extracted from decorators)."""
+        return get_processing_steps(self)
 
     def initialize(self) -> None:
         """Initialize hand landmark backend."""
@@ -96,70 +107,59 @@ class GestureExtractor(Module):
         self._initialized = False
         logger.info("GestureExtractor cleaned up")
 
-    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
-        """Extract gesture observations from a frame.
+    # ========== Processing Steps (decorated methods) ==========
 
-        Args:
-            frame: Input frame to analyze.
-            deps: Not used (no dependencies).
+    @processing_step(
+        name="hand_detection",
+        description="Detect hands with 21 landmarks each",
+        backend="MediaPipeHandsBackend",
+        input_type="Frame (BGR image)",
+        output_type="List[HandLandmarks]",
+    )
+    def _detect_hands(self, image) -> List:
+        """Detect hands using backend."""
+        return self._hand_backend.detect(image)
 
-        Returns:
-            Observation with gesture signals.
-        """
-        if not self._initialized or self._hand_backend is None:
-            raise RuntimeError("Extractor not initialized. Call initialize() first.")
-
-        # Start timing for observability
-        start_ns = time.perf_counter_ns() if _hub.enabled else 0
-
-        image = frame.data
-        t_ns = frame.t_src_ns
-
-        # Detect hands
-        hands = self._hand_backend.detect(image)
-
-        if not hands:
-            # Emit timing record
-            if _hub.enabled:
-                processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
-                self._emit_extract_record(frame, 0, False, "", processing_ms, {})
-            return Observation(
-                source=self.name,
-                frame_id=frame.frame_id,
-                t_ns=t_ns,
-                signals={
-                    "hand_count": 0,
-                    "gesture_detected": 0.0,
-                    "gesture_confidence": 0.0,
-                },
-                data=GestureOutput(gestures=[], hand_landmarks=[]),
-                metadata={
-                    "gesture_type": "",
-                    "hands_detected": 0,
-                },
-            )
-
-        # Classify gesture for each hand
-        best_gesture = GestureType.NONE
-        best_confidence = 0.0
+    @processing_step(
+        name="gesture_classification",
+        description="Classify gesture for each hand (V-sign, thumbs up, OK, etc.)",
+        backend="Rule-based classifier",
+        input_type="List[HandLandmarks]",
+        output_type="List[GestureResult]",
+        depends_on=["hand_detection"],
+    )
+    def _classify_gestures(self, hands: List) -> List[Dict]:
+        """Classify gestures for all hands."""
         all_gestures = []
-
         for hand in hands:
             gesture, confidence = self._classify_gesture(hand)
-            all_gestures.append(
-                {
-                    "handedness": hand.handedness,
-                    "gesture": gesture.value,
-                    "confidence": confidence,
-                }
-            )
+            all_gestures.append({
+                "handedness": hand.handedness,
+                "gesture": gesture,
+                "confidence": confidence,
+            })
+        return all_gestures
 
-            # Keep track of best gesture
-            if confidence > best_confidence:
-                best_gesture = gesture
-                best_confidence = confidence
+    @processing_step(
+        name="aggregation",
+        description="Aggregate gesture signals for all hands",
+        input_type="List[GestureResult]",
+        output_type="Dict (signals, metadata)",
+        depends_on=["gesture_classification"],
+    )
+    def _aggregate_gestures(self, hands: List, all_gestures: List[Dict], image_size: tuple) -> Dict:
+        """Aggregate gesture results into signals."""
+        w, h = image_size
 
-        # Build signals
+        # Find best gesture
+        best_gesture = GestureType.NONE
+        best_confidence = 0.0
+
+        for g in all_gestures:
+            if g["confidence"] > best_confidence:
+                best_gesture = g["gesture"]
+                best_confidence = g["confidence"]
+
         gesture_detected = (
             1.0
             if best_gesture != GestureType.NONE
@@ -180,45 +180,118 @@ class GestureExtractor(Module):
                     1.0 if best_gesture == gesture_type else 0.0
                 )
 
+        # Build hand landmarks data for visualization
+        hand_landmarks_data = []
+        for i, hand in enumerate(hands):
+            hand_landmarks_data.append({
+                "handedness": hand.handedness,
+                "landmarks": hand.landmarks.tolist(),
+                "confidence": hand.confidence,
+                "gesture": all_gestures[i]["gesture"].value if i < len(all_gestures) else "",
+                "gesture_confidence": all_gestures[i]["confidence"] if i < len(all_gestures) else 0.0,
+                "image_size": (w, h),
+            })
+
+        return {
+            "signals": signals,
+            "hand_landmarks_data": hand_landmarks_data,
+            "best_gesture": best_gesture,
+            "gesture_detected": gesture_detected > 0,
+            "all_gestures": [
+                {"handedness": g["handedness"], "gesture": g["gesture"].value, "confidence": g["confidence"]}
+                for g in all_gestures
+            ],
+        }
+
+    # ========== Main process method ==========
+
+    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
+        """Extract gesture observations from a frame.
+
+        Args:
+            frame: Input frame to analyze.
+            deps: Not used (no dependencies).
+
+        Returns:
+            Observation with gesture signals.
+        """
+        if not self._initialized or self._hand_backend is None:
+            raise RuntimeError("Extractor not initialized. Call initialize() first.")
+
+        # Start timing for observability
+        start_ns = time.perf_counter_ns() if _hub.enabled else 0
+
+        image = frame.data
+        h, w = image.shape[:2]
+        t_ns = frame.t_src_ns
+
+        # Enable step timing collection
+        self._step_timings = {}
+
+        # Execute processing steps (timing auto-tracked by decorators)
+        hands = self._detect_hands(image)
+
+        if not hands:
+            # Collect timing data
+            timing = self._step_timings.copy() if self._step_timings else None
+            self._step_timings = None
+
+            # Emit timing record
+            if _hub.enabled:
+                processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+                self._emit_extract_record(frame, 0, False, "", processing_ms, {})
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=t_ns,
+                signals={
+                    "hand_count": 0,
+                    "gesture_detected": 0.0,
+                    "gesture_confidence": 0.0,
+                },
+                data=GestureOutput(gestures=[], hand_landmarks=[]),
+                metadata={
+                    "gesture_type": "",
+                    "hands_detected": 0,
+                },
+                timing=timing,
+            )
+
+        # Execute classification and aggregation steps
+        all_gestures = self._classify_gestures(hands)
+        result = self._aggregate_gestures(hands, all_gestures, (w, h))
+
+        # Collect timing data
+        timing = self._step_timings.copy() if self._step_timings else None
+        self._step_timings = None
+
         # Emit observability records
         if _hub.enabled:
             processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
             self._emit_extract_record(
                 frame,
                 len(hands),
-                gesture_detected > 0,
-                best_gesture.value if gesture_detected else "",
+                result["gesture_detected"],
+                result["best_gesture"].value if result["gesture_detected"] else "",
                 processing_ms,
-                signals,
+                result["signals"],
             )
-
-        # Build hand landmarks data for visualization
-        h, w = image.shape[:2]
-        hand_landmarks_data = []
-        for i, hand in enumerate(hands):
-            hand_landmarks_data.append({
-                "handedness": hand.handedness,
-                "landmarks": hand.landmarks.tolist(),  # (21, 3) array
-                "confidence": hand.confidence,
-                "gesture": all_gestures[i]["gesture"] if i < len(all_gestures) else "",
-                "gesture_confidence": all_gestures[i]["confidence"] if i < len(all_gestures) else 0.0,
-                "image_size": (w, h),
-            })
 
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
             t_ns=t_ns,
-            signals=signals,
+            signals=result["signals"],
             data=GestureOutput(
-                gestures=[g["gesture"] for g in all_gestures],
-                hand_landmarks=hand_landmarks_data,
+                gestures=[g["gesture"] for g in result["all_gestures"]],
+                hand_landmarks=result["hand_landmarks_data"],
             ),
             metadata={
-                "gesture_type": best_gesture.value if gesture_detected else "",
+                "gesture_type": result["best_gesture"].value if result["gesture_detected"] else "",
                 "hands_detected": len(hands),
-                "all_gestures": all_gestures,
+                "all_gestures": result["all_gestures"],
             },
+            timing=timing,
         )
 
     def _classify_gesture(self, hand: HandLandmarks) -> tuple[GestureType, float]:

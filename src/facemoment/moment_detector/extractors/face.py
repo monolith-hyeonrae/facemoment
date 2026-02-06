@@ -12,6 +12,9 @@ from facemoment.moment_detector.extractors.base import (
     Module,
     Observation,
     FaceObservation,
+    ProcessingStep,
+    processing_step,
+    get_processing_steps,
 )
 from facemoment.moment_detector.extractors.backends.base import (
     FaceDetectionBackend,
@@ -91,6 +94,9 @@ class FaceExtractor(Module):
         self._next_face_id = 0
         self._prev_faces: List[tuple[int, tuple[int, int, int, int]]] = []  # (id, bbox)
 
+        # Step timing tracking (populated during process())
+        self._step_timings: Optional[Dict[str, float]] = None
+
     @property
     def name(self) -> str:
         return "face"
@@ -108,6 +114,11 @@ class FaceExtractor(Module):
             raise ValueError(f"Invalid ROI: {value}. Must be (x1, y1, x2, y2) with 0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1")
         self._roi = value
         logger.info(f"FaceExtractor ROI set to {value}")
+
+    @property
+    def processing_steps(self) -> List[ProcessingStep]:
+        """Get the list of internal processing steps (auto-extracted from decorators)."""
+        return get_processing_steps(self)
 
     def initialize(self) -> None:
         """Initialize face detection and expression backends."""
@@ -212,77 +223,70 @@ class FaceExtractor(Module):
 
         logger.info("FaceExtractor cleaned up")
 
-    def process(
+    # ========== Processing Steps (decorated methods) ==========
+
+    @processing_step(
+        name="detect",
+        description="Face detection with landmarks and head pose",
+        backend="InsightFace SCRFD",
+        input_type="Frame (BGR image)",
+        output_type="List[DetectedFace]",
+    )
+    def _detect_faces(self, image) -> List[DetectedFace]:
+        """Detect faces using backend."""
+        return self._face_backend.detect(image)
+
+    @processing_step(
+        name="expression",
+        description="Facial expression and emotion analysis",
+        backend="HSEmotion",
+        input_type="Frame + List[DetectedFace]",
+        output_type="List[ExpressionResult]",
+        optional=True,
+        depends_on=["detect"],
+    )
+    def _analyze_expressions(self, image, detected_faces: List[DetectedFace]) -> List:
+        """Analyze expressions for detected faces."""
+        if self._expression_backend is None:
+            return []
+        return self._expression_backend.analyze(image, detected_faces)
+
+    @processing_step(
+        name="tracking",
+        description="Face ID assignment using IOU matching",
+        backend="IOU-based",
+        input_type="List[DetectedFace]",
+        output_type="List[int] (face IDs)",
+        depends_on=["detect"],
+    )
+    def _assign_tracking_ids(self, detected_faces: List[DetectedFace]) -> List[int]:
+        """Assign face IDs using simple IoU-based tracking."""
+        return self._assign_face_ids(detected_faces)
+
+    @processing_step(
+        name="roi_filter",
+        description="Filter faces outside region of interest and convert to observations",
+        input_type="List[DetectedFace] + IDs + Expressions",
+        output_type="Tuple[List[FaceObservation], List[tuple]]",
+        depends_on=["tracking", "expression"],
+    )
+    def _filter_and_convert(
         self,
-        frame: Frame,
-        deps: Optional[Dict[str, "Observation"]] = None,
-    ) -> Optional[Observation]:
-        """Extract face observations from a frame.
-
-        Args:
-            frame: Input frame to analyze.
-            deps: Optional dependencies (not used by this composite extractor).
-
-        Returns:
-            Observation with detected faces and their features.
-        """
-        if self._face_backend is None:
-            raise RuntimeError("Extractor not initialized. Call initialize() first.")
-
-        # Start timing (always measure for profile mode)
-        start_ns = time.perf_counter_ns()
-
-        image = frame.data
-        h, w = image.shape[:2]
-
-        # Component timing
-        timing = {}
-
-        # Detect faces (with timing)
-        detect_start = time.perf_counter_ns()
-        detected_faces = self._face_backend.detect(image)
-        timing["detect_ms"] = (time.perf_counter_ns() - detect_start) / 1_000_000
-
-        if not detected_faces:
-            # Emit timing record
-            if _hub.enabled:
-                processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
-                self._emit_extract_record(frame, 0, 0.0, processing_ms, {})
-            return Observation(
-                source=self.name,
-                frame_id=frame.frame_id,
-                t_ns=frame.t_src_ns,
-                signals={
-                    "face_count": 0,
-                    "max_expression": 0.0,
-                    "expression_happy": 0.0,
-                    "expression_angry": 0.0,
-                    "expression_neutral": 1.0,
-                },
-                faces=[],
-                timing=timing,
-            )
-
-        # Analyze expressions (with timing)
-        expressions = []
-        if self._expression_backend is not None:
-            expr_start = time.perf_counter_ns()
-            expressions = self._expression_backend.analyze(image, detected_faces)
-            timing["expression_ms"] = (time.perf_counter_ns() - expr_start) / 1_000_000
-
-        # Assign face IDs (simple IoU-based tracking)
-        face_ids = self._assign_face_ids(detected_faces)
-
-        # Convert to FaceObservations
+        detected_faces: List[DetectedFace],
+        face_ids: List[int],
+        expressions: List,
+        image_size: tuple,
+    ) -> tuple:
+        """Filter by ROI and convert to FaceObservation."""
+        w, h = image_size
         face_observations = []
-        prev_faces_update = []  # Track (face_id, original_bbox) for IOU tracking
+        prev_faces_update = []
         max_expression = 0.0
         max_happy = 0.0
         max_angry = 0.0
-        min_neutral = 1.0  # Track minimum neutral (more interesting = less neutral)
+        min_neutral = 1.0
 
         for i, (face, face_id) in enumerate(zip(detected_faces, face_ids)):
-            # Get expression if available
             expression = expressions[i] if i < len(expressions) else None
 
             # Calculate normalized bbox
@@ -298,7 +302,7 @@ class FaceExtractor(Module):
             center_y = norm_y + norm_h / 2
             center_distance = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5
 
-            # ROI filter: skip faces with center outside ROI
+            # ROI filter
             roi_x1, roi_y1, roi_x2, roi_y2 = self._roi
             if not (roi_x1 <= center_x <= roi_x2 and roi_y1 <= center_y <= roi_y2):
                 logger.debug(
@@ -307,7 +311,7 @@ class FaceExtractor(Module):
                 )
                 continue
 
-            # Check if face is fully inside frame (with small margin)
+            # Inside frame check
             margin = 0.02
             inside_frame = (
                 norm_x > margin
@@ -331,7 +335,6 @@ class FaceExtractor(Module):
                 for em_name, em_val in expression.emotions.items():
                     signals[f"em_{em_name}"] = em_val
 
-                # Track individual emotions
                 face_happy = expression.emotions.get("happy", 0.0)
                 face_angry = expression.emotions.get("angry", 0.0)
                 face_neutral = expression.emotions.get("neutral", 1.0)
@@ -355,11 +358,87 @@ class FaceExtractor(Module):
                 signals=signals,
             )
             face_observations.append(face_obs)
-            # Store original bbox for IOU tracking (not filtered index)
             prev_faces_update.append((face_id, face.bbox))
 
-        # Update tracking state with correct face_id -> bbox mapping
+        return (
+            face_observations,
+            prev_faces_update,
+            {
+                "max_expression": max_expression,
+                "max_happy": max_happy,
+                "max_angry": max_angry,
+                "min_neutral": min_neutral,
+            },
+        )
+
+    # ========== Main process method ==========
+
+    def process(
+        self,
+        frame: Frame,
+        deps: Optional[Dict[str, "Observation"]] = None,
+    ) -> Optional[Observation]:
+        """Extract face observations from a frame.
+
+        Args:
+            frame: Input frame to analyze.
+            deps: Optional dependencies (not used by this composite extractor).
+
+        Returns:
+            Observation with detected faces and their features.
+        """
+        if self._face_backend is None:
+            raise RuntimeError("Extractor not initialized. Call initialize() first.")
+
+        # Start timing (always measure for profile mode)
+        start_ns = time.perf_counter_ns()
+
+        image = frame.data
+        h, w = image.shape[:2]
+
+        # Enable step timing collection
+        self._step_timings = {}
+
+        # Execute processing steps (timing auto-tracked by decorators)
+        detected_faces = self._detect_faces(image)
+
+        if not detected_faces:
+            # Collect timing data
+            timing = self._step_timings.copy() if self._step_timings else None
+            self._step_timings = None
+
+            # Emit timing record
+            if _hub.enabled:
+                processing_ms = (time.perf_counter_ns() - start_ns) / 1_000_000
+                self._emit_extract_record(frame, 0, 0.0, processing_ms, {})
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "face_count": 0,
+                    "max_expression": 0.0,
+                    "expression_happy": 0.0,
+                    "expression_angry": 0.0,
+                    "expression_neutral": 1.0,
+                },
+                faces=[],
+                timing=timing,
+            )
+
+        # Execute remaining steps
+        expressions = self._analyze_expressions(image, detected_faces)
+        face_ids = self._assign_tracking_ids(detected_faces)
+        face_observations, prev_faces_update, metrics = self._filter_and_convert(
+            detected_faces, face_ids, expressions, (w, h)
+        )
+
+        # Update tracking state
         self._prev_faces = prev_faces_update
+
+        # Collect timing data
+        timing = self._step_timings.copy() if self._step_timings else None
+        self._step_timings = None
 
         # Emit observability records
         if _hub.enabled:
@@ -367,9 +446,9 @@ class FaceExtractor(Module):
             self._emit_extract_record(
                 frame,
                 len(face_observations),
-                max_expression,
+                metrics["max_expression"],
                 processing_ms,
-                {"face_count": len(face_observations), "max_expression": max_expression},
+                {"face_count": len(face_observations), "max_expression": metrics["max_expression"]},
             )
             # Emit detailed per-face records at VERBOSE level
             if _hub.is_level_enabled(TraceLevel.VERBOSE):
@@ -388,19 +467,16 @@ class FaceExtractor(Module):
                         center_distance=face_obs.center_distance,
                     ))
 
-        # Record total timing
-        timing["total_ms"] = (time.perf_counter_ns() - start_ns) / 1_000_000
-
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
             t_ns=frame.t_src_ns,
             signals={
                 "face_count": len(face_observations),
-                "max_expression": max_expression,
-                "expression_happy": max_happy,
-                "expression_angry": max_angry,
-                "expression_neutral": min_neutral,
+                "max_expression": metrics["max_expression"],
+                "expression_happy": metrics["max_happy"],
+                "expression_angry": metrics["max_angry"],
+                "expression_neutral": metrics["min_neutral"],
             },
             faces=face_observations,
             timing=timing,

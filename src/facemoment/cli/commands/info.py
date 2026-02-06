@@ -19,6 +19,11 @@ def run_info(args):
         _print_flow_graph(graph_format)
         return
 
+    # Handle --steps flag
+    if getattr(args, 'steps', False):
+        _print_processing_steps()
+        return
+
     print("FaceMoment - System Information")
     print("=" * 60)
 
@@ -430,3 +435,187 @@ def _print_flow_graph(fmt: str = "ascii"):
         print(graph.to_dot("FaceMoment Pipeline"))
     else:
         print(graph.print_ascii())
+
+
+def _print_processing_steps():
+    """Print internal processing steps of each extractor."""
+    print("FaceMoment - Processing Pipeline Steps")
+    print("=" * 70)
+    print()
+    print("Complete data transformation pipeline from video source to trigger output.")
+    print("Each step shows: name, description [backend], input → output (dependencies)")
+    print()
+
+    # Source preprocessing (input pipeline)
+    print("[SourceProcessor] (Input Pipeline)")
+    print("-" * 70)
+    try:
+        from facemoment.moment_detector.extractors.source import SourceProcessor
+        for i, step in enumerate(SourceProcessor._STEPS, 1):
+            opt_marker = " (optional)" if step.optional else ""
+            backend_str = f" [{step.backend}]" if step.backend else ""
+            deps_str = f" (depends: {step.depends_on})" if step.depends_on else ""
+            print(f"  {i}. {step.name}{opt_marker}")
+            print(f"     {step.description}{backend_str}")
+            print(f"     {step.input_type} → {step.output_type}{deps_str}")
+            print()
+    except (ImportError, AttributeError):
+        print("  (definition not available)")
+    print()
+
+    # Backend preprocessing (internal to ML backends)
+    print("[BackendPreprocessor] (ML Backend Internal - for reference)")
+    print("-" * 70)
+    try:
+        from facemoment.moment_detector.extractors.source import BackendPreprocessor
+        for i, step in enumerate(BackendPreprocessor._STEPS, 1):
+            opt_marker = " (optional)" if step.optional else ""
+            backend_str = f" [{step.backend}]" if step.backend else ""
+            deps_str = f" (depends: {step.depends_on})" if step.depends_on else ""
+            print(f"  {i}. {step.name}{opt_marker}")
+            print(f"     {step.description}{backend_str}")
+            print(f"     {step.input_type} → {step.output_type}{deps_str}")
+            print()
+    except (ImportError, AttributeError):
+        print("  (definition not available)")
+    print()
+
+    extractors_info = []
+
+    def _get_steps(cls):
+        """Get processing steps from class (supports both _STEPS and decorators)."""
+        # Try class-level _STEPS first
+        if hasattr(cls, '_STEPS'):
+            return cls._STEPS
+        # Try get_processing_steps (decorator-based)
+        try:
+            from facemoment.moment_detector.extractors.base import get_processing_steps
+            return get_processing_steps(cls)
+        except Exception:
+            return []
+
+    # Composite Face extractor (legacy)
+    try:
+        from facemoment.moment_detector.extractors.face import FaceExtractor
+        extractors_info.append(("FaceExtractor", "face", _get_steps(FaceExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("FaceExtractor", "face", f"NOT AVAILABLE: {e}"))
+
+    # Split Face extractors
+    try:
+        from facemoment.moment_detector.extractors.face_detect import FaceDetectionExtractor
+        extractors_info.append(("FaceDetectionExtractor", "face_detect", _get_steps(FaceDetectionExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("FaceDetectionExtractor", "face_detect", f"NOT AVAILABLE: {e}"))
+
+    try:
+        from facemoment.moment_detector.extractors.expression import ExpressionExtractor
+        extractors_info.append(("ExpressionExtractor", "expression", _get_steps(ExpressionExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("ExpressionExtractor", "expression", f"NOT AVAILABLE: {e}"))
+
+    try:
+        from facemoment.moment_detector.extractors.face_classifier import FaceClassifierExtractor
+        extractors_info.append(("FaceClassifierExtractor", "face_classifier", _get_steps(FaceClassifierExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("FaceClassifierExtractor", "face_classifier", f"NOT AVAILABLE: {e}"))
+
+    # PoseExtractor
+    try:
+        from facemoment.moment_detector.extractors.pose import PoseExtractor
+        extractors_info.append(("PoseExtractor", "pose", _get_steps(PoseExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("PoseExtractor", "pose", f"NOT AVAILABLE: {e}"))
+
+    # GestureExtractor
+    try:
+        from facemoment.moment_detector.extractors.gesture import GestureExtractor
+        extractors_info.append(("GestureExtractor", "gesture", _get_steps(GestureExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("GestureExtractor", "gesture", f"NOT AVAILABLE: {e}"))
+
+    # QualityExtractor (decorator-based)
+    try:
+        from facemoment.moment_detector.extractors.quality import QualityExtractor
+        extractors_info.append(("QualityExtractor", "quality", _get_steps(QualityExtractor)))
+    except (ImportError, AttributeError) as e:
+        extractors_info.append(("QualityExtractor", "quality", f"NOT AVAILABLE: {e}"))
+
+    # Print each extractor's steps with DAG info
+    for class_name, name, steps in extractors_info:
+        print(f"[{class_name}] (name: {name})")
+        print("-" * 70)
+
+        if isinstance(steps, str):
+            print(f"  {steps}")
+        else:
+            for i, step in enumerate(steps, 1):
+                opt_marker = " (optional)" if step.optional else ""
+                backend_str = f" [{step.backend}]" if step.backend else ""
+                deps_str = f" (depends: {step.depends_on})" if step.depends_on else ""
+                print(f"  {i}. {step.name}{opt_marker}")
+                print(f"     {step.description}{backend_str}")
+                print(f"     {step.input_type} → {step.output_type}{deps_str}")
+                print()
+
+        print()
+
+    # Print ASCII visualization
+    print("=" * 70)
+    print("[Complete Pipeline Visualization]")
+    print("-" * 70)
+    print("""
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │  SOURCE PREPROCESSING                                               │
+  │  ┌──────────────┐   ┌───────────────┐   ┌────────┐   ┌───────────┐  │
+  │  │ video_decode │ → │ frame_sampling│ → │ resize │ → │frame_create│  │
+  │  │ [OpenCV]     │   │ [skip frames] │   │(option)│   │ [Frame]   │  │
+  │  └──────────────┘   └───────────────┘   └────────┘   └─────┬─────┘  │
+  └────────────────────────────────────────────────────────────┼────────┘
+                                                               │
+  Frame (BGR, original resolution)                             │
+       ┌───────────────────────────────────────────────────────┘
+       │
+       ├────────────────────────────────┬──────────────────────────────────┐
+       │                                │                                  │
+       ▼                                ▼                                  ▼
+  ┌─────────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
+  │  FaceDetectionExt   │    │    QualityExtractor  │    │   PoseExtractor  │
+  │  ┌───────────────┐  │    │ ┌──────────────────┐ │    │ ┌──────────────┐ │
+  │  │ detect        │  │    │ │ grayscale_convert│ │    │ │ pose_estim   │ │
+  │  │ (→640x640)    │  │    │ │ blur_analysis    │ │    │ │ upper_body   │ │
+  │  │ tracking      │  │    │ │ brightness       │ │    │ │ hands_raised │ │
+  │  │ roi_filter    │  │    │ │ contrast         │ │    │ │ wave_detect  │ │
+  │  └───────┬───────┘  │    │ │ quality_gate     │ │    │ │ aggregation  │ │
+  └──────────┼──────────┘    │ └──────────────────┘ │    │ └──────────────┘ │
+             │               └──────────────────────┘    └──────────────────┘
+    ┌────────┴────────┐
+    │                 │
+    ▼                 ▼
+  ┌────────────────┐  ┌───────────────────┐    ┌───────────────────────┐
+  │ExpressionExt   │  │FaceClassifierExt  │    │   GestureExtractor    │
+  │(depends:       │  │(depends:          │    │ ┌───────────────────┐ │
+  │ face_detect)   │  │ face_detect)      │    │ │ hand_detection    │ │
+  │ ┌────────────┐ │  │ ┌───────────────┐ │    │ │ finger_state      │ │
+  │ │ expression │ │  │ │ track_update  │ │    │ │ gesture_classify  │ │
+  │ │ aggregation│ │  │ │ noise_filter  │ │    │ │ aggregation       │ │
+  │ └────────────┘ │  │ │ stability_chk │ │    │ └───────────────────┘ │
+  └────────────────┘  │ │ role_classify │ │    └───────────────────────┘
+                      │ │ role_assign   │ │
+                      │ └───────────────┘ │
+                      └───────────────────┘
+             │                 │                           │
+             └─────────────────┴───────────────────────────┘
+                                        │
+                                        ▼
+                               ┌─────────────────┐
+                               │HighlightFusion  │
+                               │  (Trigger)      │
+                               └─────────────────┘
+                                        │
+                                        ▼
+                               ┌─────────────────┐
+                               │  Clip Output    │
+                               │  [visualbase]   │
+                               └─────────────────┘
+""")

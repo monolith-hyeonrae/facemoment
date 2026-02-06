@@ -19,6 +19,9 @@ from facemoment.moment_detector.extractors.base import (
     Module,
     Observation,
     FaceObservation,
+    ProcessingStep,
+    processing_step,
+    get_processing_steps,
 )
 from facemoment.moment_detector.extractors.outputs import FaceDetectOutput
 
@@ -79,7 +82,7 @@ class FaceClassifierExtractor(Module):
         self,
         min_track_frames: int = 5,
         min_area_ratio: float = 0.005,
-        min_confidence: float = 0.3,  # Lowered to 0.3 to handle side-angle faces
+        min_confidence: float = 0.3,
         main_zone: tuple[float, float] = (0.3, 0.7),
         edge_margin: float = 0.05,
     ):
@@ -91,11 +94,19 @@ class FaceClassifierExtractor(Module):
 
         # Tracking state: face_id -> history
         self._track_history: Dict[int, List[FaceObservation]] = defaultdict(list)
-        self._track_stats: Dict[int, Dict] = {}  # Aggregated stats per face_id
+        self._track_stats: Dict[int, Dict] = {}
+
+        # Step timing tracking (auto-populated by @processing_step decorator)
+        self._step_timings: Optional[Dict[str, float]] = None
 
     @property
     def name(self) -> str:
         return "face_classifier"
+
+    @property
+    def processing_steps(self) -> List[ProcessingStep]:
+        """Get the list of internal processing steps (auto-extracted from decorators)."""
+        return get_processing_steps(self)
 
     def initialize(self) -> None:
         self._track_history.clear()
@@ -106,6 +117,125 @@ class FaceClassifierExtractor(Module):
         self._track_history.clear()
         self._track_stats.clear()
         logger.info("FaceClassifierExtractor cleaned up")
+
+    # ========== Processing Steps (decorated methods) ==========
+
+    @processing_step(
+        name="track_update",
+        description="Update face tracking history and stats",
+        input_type="List[FaceObservation]",
+        output_type="Set[int] (current IDs)",
+    )
+    def _update_tracking(self, faces: List[FaceObservation]) -> set:
+        """Update tracking history for all faces."""
+        current_ids = set()
+        for face in faces:
+            self._track_history[face.face_id].append(face)
+            current_ids.add(face.face_id)
+            self._update_stats(face.face_id, face)
+        return current_ids
+
+    @processing_step(
+        name="classify",
+        description="Classify each face (noise, transient, main/passenger candidate)",
+        backend="Rule-based scorer",
+        input_type="List[FaceObservation]",
+        output_type="List[ClassifiedFace]",
+        depends_on=["track_update"],
+    )
+    def _classify_faces(self, faces: List[FaceObservation]) -> List[ClassifiedFace]:
+        """Classify each face based on criteria."""
+        classified_faces = []
+        for face in faces:
+            role, confidence = self._classify_face(face)
+            track_length = len(self._track_history[face.face_id])
+            avg_area = self._track_stats[face.face_id].get("avg_area", face.area_ratio)
+
+            classified = ClassifiedFace(
+                face=face,
+                role=role,
+                confidence=confidence,
+                track_length=track_length,
+                avg_area=avg_area,
+            )
+            classified_faces.append(classified)
+        return classified_faces
+
+    @processing_step(
+        name="role_assignment",
+        description="Assign unique roles (1 main, <=1 passenger)",
+        input_type="List[ClassifiedFace]",
+        output_type="FaceClassifierOutput",
+        depends_on=["classify"],
+    )
+    def _assign_roles(self, classified_faces: List[ClassifiedFace]) -> Dict:
+        """Assign unique roles ensuring 1 main and at most 1 passenger."""
+        candidates = []
+        transient_faces = []
+        noise_faces = []
+
+        for cf in classified_faces:
+            if cf.role in ("main", "passenger"):
+                score = cf.avg_area * 100 + cf.track_length * 0.1
+                candidates.append((score, cf))
+            elif cf.role == "transient":
+                transient_faces.append(cf)
+            else:
+                noise_faces.append(cf)
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        main_face = None
+        passenger_faces = []
+        demoted_to_transient = []
+
+        if candidates:
+            best = candidates[0][1]
+            main_face = ClassifiedFace(
+                face=best.face,
+                role="main",
+                confidence=best.confidence,
+                track_length=best.track_length,
+                avg_area=best.avg_area,
+            )
+
+            if len(candidates) > 1:
+                second = candidates[1][1]
+                passenger = ClassifiedFace(
+                    face=second.face,
+                    role="passenger",
+                    confidence=second.confidence,
+                    track_length=second.track_length,
+                    avg_area=second.avg_area,
+                )
+                passenger_faces = [passenger]
+
+            for _, cf in candidates[2:]:
+                demoted_to_transient.append(ClassifiedFace(
+                    face=cf.face,
+                    role="transient",
+                    confidence=cf.confidence,
+                    track_length=cf.track_length,
+                    avg_area=cf.avg_area,
+                ))
+
+        final_faces = []
+        if main_face:
+            final_faces.append(main_face)
+        final_faces.extend(passenger_faces)
+        final_faces.extend(demoted_to_transient)
+        final_faces.extend(transient_faces)
+        final_faces.extend(noise_faces)
+
+        return {
+            "faces": final_faces,
+            "main_face": main_face,
+            "passenger_faces": passenger_faces,
+            "transient_count": len(transient_faces) + len(demoted_to_transient),
+            "noise_count": len(noise_faces),
+        }
+
+    # ========== Main process method ==========
 
     def process(
         self,
@@ -118,12 +248,10 @@ class FaceClassifierExtractor(Module):
 
         if deps:
             if "face_detect" in deps:
-                # Split extractor: FaceDetectionExtractor
                 face_obs = deps["face_detect"]
                 if face_obs.data and hasattr(face_obs.data, 'faces'):
                     faces = face_obs.data.faces
             elif "face" in deps:
-                # Composite extractor: FaceExtractor
                 face_obs = deps["face"]
                 faces = face_obs.faces if face_obs.faces else []
 
@@ -145,193 +273,83 @@ class FaceClassifierExtractor(Module):
                 data=FaceClassifierOutput(),
             )
 
-        start_ns = time.perf_counter_ns()
+        # Enable step timing collection
+        self._step_timings = {}
 
-        # Update tracking history
-        current_ids = set()
-        for face in faces:
-            self._track_history[face.face_id].append(face)
-            current_ids.add(face.face_id)
-            self._update_stats(face.face_id, face)
+        # Execute processing steps (timing auto-tracked by decorators)
+        current_ids = self._update_tracking(faces)
+        classified_faces = self._classify_faces(faces)
+        result = self._assign_roles(classified_faces)
 
-        # Classify each face
-        classified_faces = []
-        for face in faces:
-            role, confidence = self._classify_face(face)
-            track_length = len(self._track_history[face.face_id])
-            avg_area = self._track_stats[face.face_id].get("avg_area", face.area_ratio)
-
-            classified = ClassifiedFace(
-                face=face,
-                role=role,
-                confidence=confidence,
-                track_length=track_length,
-                avg_area=avg_area,
-            )
-            classified_faces.append(classified)
-
-        # Separate by initial classification
-        # Main: exactly 1, Passenger: at most 1
-        candidates = []  # (score, classified_face) for main/passenger selection
-        transient_faces = []  # Original transient faces
-        noise_faces = []  # Original noise faces
-
-        for cf in classified_faces:
-            if cf.role in ("main", "passenger"):
-                # Score based on avg_area and track_length
-                score = cf.avg_area * 100 + cf.track_length * 0.1
-                candidates.append((score, cf))
-            elif cf.role == "transient":
-                transient_faces.append(cf)
-            else:  # noise
-                noise_faces.append(cf)
-
-        # Sort candidates by score (descending)
-        candidates.sort(key=lambda x: x[0], reverse=True)
-
-        # Assign roles: best -> main, second best -> passenger (if exists)
-        main_face = None
-        passenger_faces = []
-        demoted_to_transient = []  # Candidates beyond top 2
-
-        if candidates:
-            # Best candidate becomes main
-            best = candidates[0][1]
-            main_face = ClassifiedFace(
-                face=best.face,
-                role="main",
-                confidence=best.confidence,
-                track_length=best.track_length,
-                avg_area=best.avg_area,
-            )
-
-            # Second best becomes passenger (at most 1)
-            if len(candidates) > 1:
-                second = candidates[1][1]
-                passenger = ClassifiedFace(
-                    face=second.face,
-                    role="passenger",
-                    confidence=second.confidence,
-                    track_length=second.track_length,
-                    avg_area=second.avg_area,
-                )
-                passenger_faces = [passenger]
-
-            # Remaining candidates (3rd+) become transient
-            for _, cf in candidates[2:]:
-                demoted_to_transient.append(ClassifiedFace(
-                    face=cf.face,
-                    role="transient",
-                    confidence=cf.confidence,
-                    track_length=cf.track_length,
-                    avg_area=cf.avg_area,
-                ))
-
-        # Rebuild classified_faces with corrected roles (for visualization)
-        classified_faces = []
-        if main_face:
-            classified_faces.append(main_face)
-        classified_faces.extend(passenger_faces)
-        classified_faces.extend(demoted_to_transient)
-        classified_faces.extend(transient_faces)
-        classified_faces.extend(noise_faces)
-
-        # Count
-        transient_count = len(transient_faces) + len(demoted_to_transient)
-        noise_count = len(noise_faces)
-
-        # Clean up old tracks (not seen for a while)
+        # Clean up old tracks
         self._cleanup_old_tracks(current_ids)
 
-        timing = {"total_ms": (time.perf_counter_ns() - start_ns) / 1_000_000}
+        # Collect timing data
+        timing = self._step_timings.copy() if self._step_timings else None
+        self._step_timings = None
 
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
             t_ns=frame.t_src_ns,
             signals={
-                "main_detected": 1 if main_face else 0,
-                "passenger_count": len(passenger_faces),
-                "transient_count": transient_count,
-                "noise_count": noise_count,
-                "total_faces": len(classified_faces),
+                "main_detected": 1 if result["main_face"] else 0,
+                "passenger_count": len(result["passenger_faces"]),
+                "transient_count": result["transient_count"],
+                "noise_count": result["noise_count"],
+                "total_faces": len(result["faces"]),
             },
             data=FaceClassifierOutput(
-                faces=classified_faces,
-                main_face=main_face,
-                passenger_faces=passenger_faces,
-                transient_count=transient_count,
-                noise_count=noise_count,
+                faces=result["faces"],
+                main_face=result["main_face"],
+                passenger_faces=result["passenger_faces"],
+                transient_count=result["transient_count"],
+                noise_count=result["noise_count"],
             ),
             timing=timing,
         )
 
-    def _classify_face(self, face: FaceObservation) -> tuple[str, float]:
-        """Classify a face based on various criteria.
+    # ========== Helper methods (not processing steps) ==========
 
-        Returns:
-            Tuple of (role, confidence)
-        """
+    def _classify_face(self, face: FaceObservation) -> tuple[str, float]:
+        """Classify a face based on various criteria."""
         track_length = len(self._track_history[face.face_id])
         stats = self._track_stats.get(face.face_id, {})
 
-        # Check for noise first
         if self._is_noise(face, stats):
-            logger.debug(
-                f"Face {face.face_id} classified as noise: "
-                f"area={face.area_ratio:.4f}, conf={face.confidence:.2f}, "
-                f"bbox={face.bbox}"
-            )
             return ("noise", 0.9)
 
-        # Check for transient (not enough tracking history)
         if track_length < self._min_track_frames:
             return ("transient", 0.7)
 
-        # Classify as main or passenger based on position and size
         center_x = face.bbox[0] + face.bbox[2] / 2
         main_zone_left, main_zone_right = self._main_zone
 
-        # Score for being "main"
         main_score = 0.0
-
-        # Position stability is the most important factor (camera is fixed)
-        # Passengers have stable positions, transients move around
         position_stability = stats.get("position_stability", 0.5)
         max_drift = stats.get("max_position_drift", 0.0)
 
-        # High drift indicates transient (passing by)
-        if max_drift > 0.15:  # 15% of frame movement
+        if max_drift > 0.15:
             return ("transient", 0.8)
 
-        # Position stability score (most important - 40% weight)
         main_score += position_stability * 0.4
 
-        # Size score: larger faces are more likely main (30% weight)
         avg_area = stats.get("avg_area", face.area_ratio)
-        if avg_area > 0.05:  # Large face
+        if avg_area > 0.05:
             main_score += 0.3
-        elif avg_area > 0.02:  # Medium face
+        elif avg_area > 0.02:
             main_score += 0.2
         else:
             main_score += 0.1
 
-        # Position in frame: center vs edge (20% weight)
         if main_zone_left <= center_x <= main_zone_right:
             main_score += 0.2
         else:
             main_score += 0.05
 
-        # Inside frame score (10% weight)
         if face.inside_frame:
             main_score += 0.1
 
-        # Classify based on score
-        # High score with good stability = main/passenger candidate
-        logger.debug(
-            f"Face {face.face_id}: score={main_score:.2f}, stability={position_stability:.2f}, "
-            f"drift={max_drift:.3f}, area={avg_area:.4f}, track={track_length}"
-        )
         if main_score >= 0.5 and position_stability >= 0.5:
             return ("main", main_score)
         elif main_score >= 0.3 and position_stability >= 0.3:
@@ -341,39 +359,20 @@ class FaceClassifierExtractor(Module):
 
     def _is_noise(self, face: FaceObservation, stats: Dict) -> bool:
         """Check if face is likely noise/false detection."""
-        # Too small (absolute minimum)
         if face.area_ratio < self._min_area_ratio:
-            logger.debug(f"Face {face.face_id}: noise (too small: {face.area_ratio:.4f} < {self._min_area_ratio})")
             return True
-
-        # Low confidence
         if face.confidence < self._min_confidence:
-            logger.debug(f"Face {face.face_id}: noise (low conf: {face.confidence:.2f} < {self._min_confidence})")
             return True
 
-        # Edge detection: only classify as noise if BOTH conditions are met:
-        # 1. Face is significantly cut off by frame edge (not just near edge)
-        # 2. Face is very small
         x, y, w, h = face.bbox
-        is_cut_off = (
-            x < 0.01 or  # Left edge cut off
-            y < 0.01 or  # Top edge cut off
-            x + w > 0.99 or  # Right edge cut off
-            y + h > 0.99  # Bottom edge cut off
-        )
+        is_cut_off = (x < 0.01 or y < 0.01 or x + w > 0.99 or y + h > 0.99)
         if is_cut_off and face.area_ratio < 0.008:
-            logger.debug(f"Face {face.face_id}: noise (cut off + small: area={face.area_ratio:.4f})")
             return True
 
         return False
 
     def _update_stats(self, face_id: int, face: FaceObservation) -> None:
-        """Update aggregated stats for a face track.
-
-        Tracks position stability which is key for passenger detection:
-        - Main/passenger have fixed camera positions, so their positions are stable
-        - Transient faces (passers-by) have varying positions
-        """
+        """Update aggregated stats for a face track."""
         center_x = face.bbox[0] + face.bbox[2] / 2
         center_y = face.bbox[1] + face.bbox[3] / 2
 
@@ -382,64 +381,48 @@ class FaceClassifierExtractor(Module):
                 "avg_area": face.area_ratio,
                 "avg_center_x": center_x,
                 "avg_center_y": center_y,
-                "position_stability": 1.0,  # Position stability score [0-1]
-                "max_position_drift": 0.0,  # Maximum position change observed
+                "position_stability": 1.0,
+                "max_position_drift": 0.0,
                 "frame_count": 1,
             }
         else:
             stats = self._track_stats[face_id]
-            n = stats["frame_count"]
-
-            # Exponential moving average for area
             alpha = 0.3
             stats["avg_area"] = (1 - alpha) * stats["avg_area"] + alpha * face.area_ratio
 
-            # Calculate position drift (distance from average position)
             drift_x = abs(center_x - stats["avg_center_x"])
             drift_y = abs(center_y - stats["avg_center_y"])
             position_drift = (drift_x ** 2 + drift_y ** 2) ** 0.5
 
-            # Update max drift seen
             stats["max_position_drift"] = max(stats["max_position_drift"], position_drift)
 
-            # Update average position (slow update to maintain reference point)
-            alpha_pos = 0.1  # Slower update for position
+            alpha_pos = 0.1
             stats["avg_center_x"] = (1 - alpha_pos) * stats["avg_center_x"] + alpha_pos * center_x
             stats["avg_center_y"] = (1 - alpha_pos) * stats["avg_center_y"] + alpha_pos * center_y
 
-            # Position stability: penalize large movements
-            # Passengers have drift < 0.05 (5% of frame), transients have drift > 0.1
             if position_drift > 0.1:
-                # Large movement - likely transient
                 stats["position_stability"] = max(0, stats["position_stability"] - 0.3)
             elif position_drift > 0.05:
-                # Medium movement - might be head movement
                 stats["position_stability"] = max(0, stats["position_stability"] - 0.1)
             else:
-                # Small movement - stable, recover slowly
                 stats["position_stability"] = min(1, stats["position_stability"] + 0.02)
 
-            stats["frame_count"] = n + 1
+            stats["frame_count"] += 1
 
     def _cleanup_old_tracks(self, current_ids: set, max_history: int = 30) -> None:
         """Remove old tracks and limit history length."""
-        # Remove tracks not seen recently
         to_remove = []
         for face_id in self._track_history:
             if face_id not in current_ids:
-                # Mark for removal if not seen for a while
                 history = self._track_history[face_id]
-                if len(history) > 0:
-                    # Keep some history for re-identification
-                    if len(history) > max_history:
-                        to_remove.append(face_id)
+                if len(history) > max_history:
+                    to_remove.append(face_id)
 
         for face_id in to_remove:
             del self._track_history[face_id]
             if face_id in self._track_stats:
                 del self._track_stats[face_id]
 
-        # Limit history length for active tracks
         for face_id in self._track_history:
             if len(self._track_history[face_id]) > max_history:
                 self._track_history[face_id] = self._track_history[face_id][-max_history:]
